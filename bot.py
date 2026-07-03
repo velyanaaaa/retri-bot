@@ -42,7 +42,7 @@ SHIFT_2_BARISTA = ["06:30", "09:30"]
 JADWAL_BARISTA = {
     "senin":  {"Dian": "08:30", "Yuyu": "OFF",   "Krisna": "09:30", "Ayuk": "06:30"},
     "selasa": {"Dian": "08:30", "Yuyu": "09:30",  "Krisna": "06:30", "Ayuk": "OFF"},
-    "rabu":   {"Dian": "09:30", "Yuyu": "06:30",  "Krisna": "06:30", "Ayuk": "09:30"},
+    "rabu":   {"Dian": "09:30", "Yuyu": "08:30",  "Krisna": "06:30", "Ayuk": "09:30"},
     "kamis":  {"Dian": "06:30", "Yuyu": "06:30",  "Krisna": "09:30", "Ayuk": "09:30"},
     "jumat":  {"Dian": "06:30", "Yuyu": "09:30",  "Krisna": "09:30", "Ayuk": "06:30"},
     "sabtu":  {"Dian": "OFF",   "Yuyu": "08:30",  "Krisna": "06:30", "Ayuk": "09:30"},
