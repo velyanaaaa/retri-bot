@@ -46,7 +46,7 @@ JADWAL_BARISTA = {
     "kamis":  {"Dian": "06:30", "Yuyu": "06:30",  "Krisna": "09:30", "Ayuk": "09:30"},
     "jumat":  {"Dian": "06:30", "Yuyu": "09:30",  "Krisna": "09:30", "Ayuk": "06:30"},
     "sabtu":  {"Dian": "OFF",   "Yuyu": "08:30",  "Krisna": "06:30", "Ayuk": "09:30"},
-    "minggu": {"Dian": "09:30", "Yuyu": "06:30",  "Krisna": "OFF",   "Ayuk": "06:30"},
+    "minggu": {"Dian": "09:30", "Yuyu": "06:30",  "Krisna": "OFF",   "Ayuk": "08:30"},
 }
 
 # === TIM CHEF ===
