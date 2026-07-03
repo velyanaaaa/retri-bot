@@ -15,9 +15,9 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-BOT_TOKEN = "8002607359:AAE2r-RfjbdLe3DCEc7IevUwGL6E1FmrrGI"
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
 REQUESTS_FILE = "libur_requests.json"
-ADMIN_IDS = [1394709155, 8335650197]  # ganti dengan ID Telegram kamu (@userinfobot)
+ADMIN_IDS = [int(x) for x in os.environ.get("ADMIN_IDS", "").split(",")] # ganti dengan ID Telegram kamu (@userinfobot)
 
 HARI_VALID = ["senin", "selasa", "rabu", "kamis", "jumat", "sabtu", "minggu"]
 
@@ -35,6 +35,19 @@ OFF_TETAP_BARISTA = {
 }
 SHIFT_3_BARISTA = ["06:30", "08:30", "09:30"]
 SHIFT_2_BARISTA = ["06:30", "09:30"]
+
+# Jadwal tetap Barista (fixed, bukan auto-generate)
+# Logika: sehari sebelum OFF → 06:30, sehari setelah OFF → 09:30, sisanya → 08:30
+# Hari dengan semua masuk (rabu/kamis/jumat) → 2 shift: 06:30 & 09:30
+JADWAL_BARISTA = {
+    "senin":  {"Dian": "08:30", "Yuyu": "OFF",   "Krisna": "09:30", "Ayuk": "06:30"},
+    "selasa": {"Dian": "08:30", "Yuyu": "09:30",  "Krisna": "06:30", "Ayuk": "OFF"},
+    "rabu":   {"Dian": "09:30", "Yuyu": "06:30",  "Krisna": "06:30", "Ayuk": "09:30"},
+    "kamis":  {"Dian": "06:30", "Yuyu": "06:30",  "Krisna": "09:30", "Ayuk": "09:30"},
+    "jumat":  {"Dian": "06:30", "Yuyu": "09:30",  "Krisna": "09:30", "Ayuk": "06:30"},
+    "sabtu":  {"Dian": "OFF",   "Yuyu": "08:30",  "Krisna": "06:30", "Ayuk": "09:30"},
+    "minggu": {"Dian": "09:30", "Yuyu": "06:30",  "Krisna": "OFF",   "Ayuk": "06:30"},
+}
 
 # === TIM CHEF ===
 CHEF = ["Adi", "Ucil", "Dito"]
@@ -106,36 +119,54 @@ def siapa_off(hari, week_data, tim="barista"):
             off_list.append(nama)
     return off_list
 
+def hitung_shift_cancel_off(hari, nama_masuk_extra, week_data):
+    """
+    Saat OFF tetap seseorang di-cancel → dia masuk di hari itu.
+    Shiftnya ditentukan dari logika: sehari setelah OFF tetapnya
+    (karena dia harusnya OFF hari ini, berarti kemarin = pagi, besok = siang,
+    tapi karena dia cancel OFF = masuk hari ini, dia dapat siang/09:30
+    karena posisinya adalah 'sehari setelah OFF' dari perspektif minggunya).
+    
+    Sederhana: kalau cancel OFF → shift siang (09:30), karena dia 'dipanggil masuk'
+    di hari yang harusnya OFF.
+    """
+    return "09:30"
+
+
 def buat_jadwal_hari(hari, week_data):
     """Barista: Return list {"nama": ..., "jam": ...} untuk hari ini."""
     off_list = siapa_off(hari, week_data, tim="barista")
-    masuk = [n for n in BARISTA if n not in off_list]
+    cancelled = week_data.get("cancelled_off", [])
+    result = []
 
-    if len(masuk) == 4:
-        seed = f"{get_week_key()}-{hari}"
-        rng = random.Random(seed)
-        pasangan_copy = [p[:] for p in PASANGAN_BARISTA]
-        rng.shuffle(pasangan_copy)
-        result = []
-        for n in pasangan_copy[0]:
-            result.append({"nama": n, "jam": "06:30"})
-        for n in pasangan_copy[1]:
-            result.append({"nama": n, "jam": "09:30"})
-        return result
-    elif len(masuk) == 3:
-        result = []
-        for i, nama in enumerate(masuk):
-            result.append({"nama": nama, "jam": SHIFT_3_BARISTA[i]})
-        return result
-    elif len(masuk) == 2:
-        result = []
-        for i, nama in enumerate(masuk):
-            result.append({"nama": nama, "jam": SHIFT_2_BARISTA[i]})
-        return result
-    elif len(masuk) == 1:
-        return [{"nama": masuk[0], "jam": "06:30"}]
-    else:
-        return []
+    for nama in BARISTA:
+        jam_base = JADWAL_BARISTA[hari][nama]
+
+        if nama in off_list:
+            # OFF (baik tetap atau request libur) → skip
+            continue
+
+        # Cek: apakah ini orang yang OFF tetapnya di-cancel (dia harusnya OFF tapi masuk)
+        off_tetap = OFF_TETAP_BARISTA.get(hari)
+        if off_tetap == nama and f"{hari}_{nama}" in cancelled:
+            # Cancel OFF → logika: dia masuk siang (09:30)
+            result.append({"nama": nama, "jam": "09:30"})
+            continue
+
+        # Cek: ada request libur dari orang lain → shift mungkin perlu adjust
+        # Tapi untuk sekarang, kalau ada request libur tambahan → pakai jadwal base dari JADWAL_BARISTA
+        # Kalau masuk normal → pakai jam dari jadwal tetap
+        if jam_base == "OFF":
+            # Harusnya OFF tetap tapi sudah di-cancel → handled di atas
+            # Kalau sampai sini, berarti logika salah, skip saja
+            continue
+
+        result.append({"nama": nama, "jam": jam_base})
+
+    # Handle request libur tambahan: kalau ada yang request libur di hari ini,
+    # shift orang yang masuk ikut logika: yang 'kehilangan teman' tetap pakai jam masing-masing
+    # (tidak ada auto-rebalance shift untuk request libur tambahan)
+    return result
 
 
 def buat_jadwal_chef(hari, week_data):
