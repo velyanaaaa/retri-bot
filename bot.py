@@ -169,78 +169,16 @@ def buat_jadwal_hari(hari, week_data):
     return result
 
 
-def buat_jadwal_chef_seminggu(week_data):
-    """
-    Hitung jadwal Chef untuk SEMINGGU PENUH sekaligus.
-    Aturan fairness: setiap Chef maksimal 1x dapat 08:30 per minggu.
-    Kalau semua sudah dapat 08:30, boleh dapat lagi (pilih yang paling
-    sedikit mendapat 08:30).
-
-    Return: dict {hari: {nama: jam}}
-    """
-    hasil = {}          # {hari: {nama: jam}}
-    sudah_0830 = {}     # {nama: jumlah dapat 08:30 minggu ini}
-    for nama in CHEF:
-        sudah_0830[nama] = 0
-
-    for hari in HARI_VALID:
-        off_list = siapa_off(hari, week_data, tim="chef")
-        ada_libur = len(off_list) > 0
-        hasil[hari] = {}
-
-        for nama in CHEF:
-            if nama in off_list:
-                hasil[hari][nama] = "OFF"
-                continue
-            jam_tetap = JADWAL_CHEF[hari][nama]
-            if jam_tetap == "OFF":
-                hasil[hari][nama] = "OFF"
-                continue
-            hasil[hari][nama] = jam_tetap  # default dulu
-
-        if not ada_libur:
-            continue  # tidak ada yang libur, tidak perlu atur 08:30
-
-        # Ada yang libur → cari siapa yang harusnya dapat 09:30
-        masuk = [n for n in CHEF if hasil[hari][n] not in ("OFF",)]
-        kandidat_0830 = [n for n in masuk if JADWAL_CHEF[hari][n] == "09:30"]
-
-        if not kandidat_0830:
-            continue  # tidak ada yang 09:30 hari ini, skip
-
-        # Pilih kandidat yang paling sedikit dapat 08:30 minggu ini
-        # (prioritaskan yang belum dapat sama sekali = 0x)
-        kandidat_sorted = sorted(kandidat_0830, key=lambda n: sudah_0830[n])
-        terpilih = kandidat_sorted[0]  # yang paling sedikit dapat 08:30
-
-        hasil[hari][terpilih] = "08:30"
-        sudah_0830[terpilih] += 1
-
-    return hasil
-
-
-# Variabel global untuk cache jadwal chef seminggu (reset tiap generate PDF)
-_cache_jadwal_chef = {}
-
-
 def buat_jadwal_chef(hari, week_data):
-    """
-    Wrapper yang mengambil jadwal dari cache seminggu.
-    Cache di-generate sekali per pemanggilan generate_pdf.
-    """
-    global _cache_jadwal_chef
-    # Pakai id(week_data) sebagai key cache supaya reset kalau week_data berubah
-    cache_key = id(week_data)
-    if cache_key not in _cache_jadwal_chef:
-        _cache_jadwal_chef = {cache_key: buat_jadwal_chef_seminggu(week_data)}
-
-    jadwal_minggu = _cache_jadwal_chef[cache_key]
+    """Chef: Return list {"nama": ..., "jam": ...} untuk hari ini."""
+    off_list = siapa_off(hari, week_data, tim="chef")
     result = []
     for nama in CHEF:
-        jam = jadwal_minggu[hari].get(nama, "OFF")
-        if jam == "OFF":
-            continue
-        result.append({"nama": nama, "jam": jam})
+        jam_tetap = JADWAL_CHEF[hari][nama]
+        if nama in off_list:
+            continue  # OFF, skip
+        # Cek apakah OFF tetap di-cancel → tetap pakai jam dari JADWAL_CHEF
+        result.append({"nama": nama, "jam": jam_tetap})
     return result
 
 
