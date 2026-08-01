@@ -169,102 +169,78 @@ def buat_jadwal_hari(hari, week_data):
     return result
 
 
-def hitung_jatah_0830(week_data):
+def buat_jadwal_chef_seminggu(week_data):
     """
-    Hitung siapa saja Chef yang sudah dapat jam 08:30 minggu ini.
-    Dipakai untuk memastikan setiap Chef maksimal 1x dapat 08:30 per minggu.
-    Return: set nama Chef yang sudah dapat 08:30.
+    Hitung jadwal Chef untuk SEMINGGU PENUH sekaligus.
+    Aturan fairness: setiap Chef maksimal 1x dapat 08:30 per minggu.
+    Kalau semua sudah dapat 08:30, boleh dapat lagi (pilih yang paling
+    sedikit mendapat 08:30).
+
+    Return: dict {hari: {nama: jam}}
     """
-    sudah_dapat_0830 = set()
+    hasil = {}          # {hari: {nama: jam}}
+    sudah_0830 = {}     # {nama: jumlah dapat 08:30 minggu ini}
+    for nama in CHEF:
+        sudah_0830[nama] = 0
+
     for hari in HARI_VALID:
         off_list = siapa_off(hari, week_data, tim="chef")
-        masuk = [n for n in CHEF if n not in off_list and JADWAL_CHEF[hari][n] != "OFF"]
         ada_libur = len(off_list) > 0
-        if ada_libur:
-            # Cek siapa yang harusnya dapat 09:30 hari ini (sebelum aturan fairness)
-            for nama in masuk:
-                jam_tetap = JADWAL_CHEF[hari][nama]
-                if jam_tetap == "09:30":
-                    # Cek apakah dia sudah dapat 08:30 sebelumnya
-                    if nama not in sudah_dapat_0830:
-                        sudah_dapat_0830.add(nama)
-                    # Kalau sudah dapat, tidak ditambah lagi (tetap di set)
-    return sudah_dapat_0830
+        hasil[hari] = {}
+
+        for nama in CHEF:
+            if nama in off_list:
+                hasil[hari][nama] = "OFF"
+                continue
+            jam_tetap = JADWAL_CHEF[hari][nama]
+            if jam_tetap == "OFF":
+                hasil[hari][nama] = "OFF"
+                continue
+            hasil[hari][nama] = jam_tetap  # default dulu
+
+        if not ada_libur:
+            continue  # tidak ada yang libur, tidak perlu atur 08:30
+
+        # Ada yang libur → cari siapa yang harusnya dapat 09:30
+        masuk = [n for n in CHEF if hasil[hari][n] not in ("OFF",)]
+        kandidat_0830 = [n for n in masuk if JADWAL_CHEF[hari][n] == "09:30"]
+
+        if not kandidat_0830:
+            continue  # tidak ada yang 09:30 hari ini, skip
+
+        # Pilih kandidat yang paling sedikit dapat 08:30 minggu ini
+        # (prioritaskan yang belum dapat sama sekali = 0x)
+        kandidat_sorted = sorted(kandidat_0830, key=lambda n: sudah_0830[n])
+        terpilih = kandidat_sorted[0]  # yang paling sedikit dapat 08:30
+
+        hasil[hari][terpilih] = "08:30"
+        sudah_0830[terpilih] += 1
+
+    return hasil
+
+
+# Variabel global untuk cache jadwal chef seminggu (reset tiap generate PDF)
+_cache_jadwal_chef = {}
 
 
 def buat_jadwal_chef(hari, week_data):
     """
-    Chef: Return list {"nama": ..., "jam": ...} untuk hari ini.
-
-    Aturan fairness:
-    - Kalau ada Chef libur → yang dapat 09:30 turun jadi 08:30.
-    - Tapi setiap Chef maksimal 1x dapat 08:30 per minggu.
-    - Kalau Chef yang harusnya dapat 08:30 sudah pernah dapat 08:30
-      di hari lain minggu ini → cari Chef lain yang belum dapat 08:30.
-    - Kalau semua Chef yang masuk sudah pernah dapat 08:30 → tetap 08:30
-      (tidak ada yang bisa dihindari).
+    Wrapper yang mengambil jadwal dari cache seminggu.
+    Cache di-generate sekali per pemanggilan generate_pdf.
     """
-    off_list = siapa_off(hari, week_data, tim="chef")
-    ada_libur = len(off_list) > 0
+    global _cache_jadwal_chef
+    # Pakai id(week_data) sebagai key cache supaya reset kalau week_data berubah
+    cache_key = id(week_data)
+    if cache_key not in _cache_jadwal_chef:
+        _cache_jadwal_chef = {cache_key: buat_jadwal_chef_seminggu(week_data)}
+
+    jadwal_minggu = _cache_jadwal_chef[cache_key]
     result = []
-
-    if not ada_libur:
-        # Tidak ada yang libur → pakai jadwal normal, tidak ada perubahan
-        for nama in CHEF:
-            jam_tetap = JADWAL_CHEF[hari][nama]
-            if nama in off_list:
-                continue
-            result.append({"nama": nama, "jam": jam_tetap})
-        return result
-
-    # Ada yang libur → perlu cek fairness 08:30
-    # Hitung siapa yang sudah dapat 08:30 di hari-hari SEBELUM hari ini
-    sudah_dapat_0830 = set()
-    idx_hari_ini = HARI_VALID.index(hari)
-
-    for h in HARI_VALID[:idx_hari_ini]:  # hanya hari-hari sebelumnya
-        off_h = siapa_off(h, week_data, tim="chef")
-        ada_libur_h = len(off_h) > 0
-        if not ada_libur_h:
-            continue
-        masuk_h = [n for n in CHEF if n not in off_h and JADWAL_CHEF[h][n] != "OFF"]
-        # Siapa yang dapat 08:30 di hari h?
-        # Logika: Chef yang jam tetapnya 09:30 dan ada libur → dapat 08:30
-        # tapi dengan fairness, Chef yang belum dapat yang diprioritaskan
-        kandidat_0830_h = [n for n in masuk_h if JADWAL_CHEF[h][n] == "09:30"]
-        belum_dapat_h = [n for n in kandidat_0830_h if n not in sudah_dapat_0830]
-        if belum_dapat_h:
-            # Yang dapat 08:30 hari h adalah yang pertama belum dapat
-            sudah_dapat_0830.add(belum_dapat_h[0])
-        elif kandidat_0830_h:
-            # Semua sudah dapat, terpaksa salah satu dapat lagi
-            sudah_dapat_0830.add(kandidat_0830_h[0])
-
-    # Sekarang tentukan jam untuk hari ini
-    masuk_hari_ini = [n for n in CHEF if n not in off_list and JADWAL_CHEF[hari][n] != "OFF"]
-    kandidat_0830 = [n for n in masuk_hari_ini if JADWAL_CHEF[hari][n] == "09:30"]
-    belum_dapat = [n for n in kandidat_0830 if n not in sudah_dapat_0830]
-
-    # Siapa yang dapat 08:30 hari ini?
-    if belum_dapat:
-        dapat_0830_hari_ini = belum_dapat[0]   # prioritaskan yang belum dapat
-    elif kandidat_0830:
-        dapat_0830_hari_ini = kandidat_0830[0]  # semua sudah dapat, terpaksa salah satu
-    else:
-        dapat_0830_hari_ini = None
-
     for nama in CHEF:
-        if nama in off_list:
+        jam = jadwal_minggu[hari].get(nama, "OFF")
+        if jam == "OFF":
             continue
-        jam_tetap = JADWAL_CHEF[hari][nama]
-        if jam_tetap == "OFF":
-            continue
-        if nama == dapat_0830_hari_ini:
-            jam_final = "08:30"
-        else:
-            jam_final = jam_tetap
-        result.append({"nama": nama, "jam": jam_final})
-
+        result.append({"nama": nama, "jam": jam})
     return result
 
 
