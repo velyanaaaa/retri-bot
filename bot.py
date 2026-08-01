@@ -17,7 +17,9 @@ logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 REQUESTS_FILE = "libur_requests.json"
-ADMIN_IDS = [int(x) for x in os.environ.get("ADMIN_IDS", "").split(",")] # ganti dengan ID Telegram kamu (@userinfobot)
+# Fix: kalau ADMIN_IDS kosong/tidak di-set, default ke list kosong (tidak crash)
+_raw_ids = os.environ.get("ADMIN_IDS", "").strip()
+ADMIN_IDS = [int(x.strip()) for x in _raw_ids.split(",") if x.strip().isdigit()]
 
 HARI_VALID = ["senin", "selasa", "rabu", "kamis", "jumat", "sabtu", "minggu"]
 
