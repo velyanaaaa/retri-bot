@@ -17,7 +17,6 @@ logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 REQUESTS_FILE = "libur_requests.json"
-# Fix: kalau ADMIN_IDS kosong/tidak di-set, default ke list kosong (tidak crash)
 _raw_ids = os.environ.get("ADMIN_IDS", "").strip()
 ADMIN_IDS = [int(x.strip()) for x in _raw_ids.split(",") if x.strip().isdigit()]
 
@@ -172,15 +171,20 @@ def buat_jadwal_hari(hari, week_data):
 
 
 def buat_jadwal_chef(hari, week_data):
-    """Chef: Return list {"nama": ..., "jam": ...} untuk hari ini."""
+    """
+    Chef: Return list {"nama": ..., "jam": ...} untuk hari ini.
+    Aturan: kalau ada 1 Chef libur (tinggal 2 orang),
+    jam 09:30 otomatis turun jadi 08:30.
+    """
     off_list = siapa_off(hari, week_data, tim="chef")
     result = []
     for nama in CHEF:
         jam_tetap = JADWAL_CHEF[hari][nama]
         if nama in off_list:
             continue  # OFF, skip
-        # Cek apakah OFF tetap di-cancel → tetap pakai jam dari JADWAL_CHEF
-        result.append({"nama": nama, "jam": jam_tetap})
+        # Kalau ada yang libur, turunkan 09:30 → 08:30
+        jam_final = "08:30" if (len(off_list) > 0 and jam_tetap == "09:30") else jam_tetap
+        result.append({"nama": nama, "jam": jam_final})
     return result
 
 
