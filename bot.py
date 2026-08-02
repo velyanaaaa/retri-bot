@@ -1,13 +1,20 @@
 """
-Cafe Schedule Bot
-- 4 orang masuk = 2 shift (06:30 & 09:30), pasangan random
-- 3 orang masuk (ada OFF) = 3 shift (06:30, 08:30, 09:30)
-- Admin bisa cancel OFF → hari otomatis jadi 2 shift
-- Admin bisa request libur tambahan
-- Max 1 karyawan libur per hari
+Bot Jadwal Café Retri
+======================
+Terminologi:
+- "Libur" = hari libur tetap mingguan karyawan (setiap karyawan dapat 1x/minggu)
+- "Cuti"  = request tidak masuk di luar hari libur tetap (perlu disetujui admin)
+
+Logika shift:
+- Barista 4 orang masuk semua  → 2 shift: 06:30 & 09:30 (pasangan tetap)
+- Barista 3 orang masuk (1 libur/cuti) → 3 shift: 06:30, 08:30, 09:30
+- Chef 3 orang masuk semua → 3 shift: 06:30, 08:00, 09:30
+- Chef 2 orang masuk (1 libur/cuti) → 2 shift: 06:30, 09:30 (tanpa 08:00)
+- Maks 1 karyawan libur/cuti per hari per tim
+- Admin bisa batalkan libur tetap → hari itu karyawan masuk
 """
 
-import os, json, random, logging
+import os, json, logging
 from datetime import datetime, timedelta
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
@@ -15,16 +22,19 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-REQUESTS_FILE = "libur_requests.json"
-ADMIN_IDS = [int(x) for x in os.environ.get("ADMIN_IDS", "").split(",")] # ganti dengan ID Telegram kamu (@userinfobot)
+BOT_TOKEN  = os.environ.get("BOT_TOKEN")
+DATA_FILE  = "cuti_requests.json"
+ADMIN_IDS  = [int(x) for x in os.environ.get("ADMIN_IDS", "").split(",") if x.strip()]
 
 HARI_VALID = ["senin", "selasa", "rabu", "kamis", "jumat", "sabtu", "minggu"]
 
-# === TIM BARISTA ===
+# ─────────────────────────────────────────────
+#  TIM BARISTA
+# ─────────────────────────────────────────────
 BARISTA = ["Dian", "Yuyu", "Krisna", "Ayuk"]
-PASANGAN_BARISTA = [["Krisna", "Dian"], ["Ayuk", "Yuyu"]]
-OFF_TETAP_BARISTA = {
+
+# Hari libur tetap tiap barista (1x per minggu)
+LIBUR_TETAP_BARISTA = {
     "senin":  "Yuyu",
     "selasa": "Ayuk",
     "rabu":   None,
@@ -33,25 +43,25 @@ OFF_TETAP_BARISTA = {
     "sabtu":  "Dian",
     "minggu": "Krisna",
 }
-SHIFT_3_BARISTA = ["06:30", "08:30", "09:30"]
-SHIFT_2_BARISTA = ["06:30", "09:30"]
 
-# Jadwal tetap Barista (fixed, bukan auto-generate)
-# Logika: sehari sebelum OFF → 06:30, sehari setelah OFF → 09:30, sisanya → 08:30
-# Hari dengan semua masuk (rabu/kamis/jumat) → 2 shift: 06:30 & 09:30
+# Jadwal shift barista per hari (sudah fixed sesuai jadwal café)
 JADWAL_BARISTA = {
-    "senin":  {"Dian": "08:30", "Yuyu": "OFF",   "Krisna": "09:30", "Ayuk": "06:30"},
-    "selasa": {"Dian": "09:30", "Yuyu": "08:30",  "Krisna": "06:30", "Ayuk": "OFF"},
-    "rabu":   {"Dian": "09:30", "Yuyu": "08:30",  "Krisna": "06:30", "Ayuk": "09:30"},
-    "kamis":  {"Dian": "06:30", "Yuyu": "06:30",  "Krisna": "09:30", "Ayuk": "09:30"},
-    "jumat":  {"Dian": "06:30", "Yuyu": "09:30",  "Krisna": "09:30", "Ayuk": "06:30"},
-    "sabtu":  {"Dian": "OFF",   "Yuyu": "08:30",  "Krisna": "06:30", "Ayuk": "09:30"},
-    "minggu": {"Dian": "09:30", "Yuyu": "06:30",  "Krisna": "OFF",   "Ayuk": "08:30"},
+    "senin":  {"Dian": "08:30", "Yuyu": "LIBUR", "Krisna": "09:30", "Ayuk": "06:30"},
+    "selasa": {"Dian": "09:30", "Yuyu": "08:30", "Krisna": "06:30", "Ayuk": "LIBUR"},
+    "rabu":   {"Dian": "09:30", "Yuyu": "08:30", "Krisna": "06:30", "Ayuk": "09:30"},
+    "kamis":  {"Dian": "06:30", "Yuyu": "06:30", "Krisna": "09:30", "Ayuk": "09:30"},
+    "jumat":  {"Dian": "06:30", "Yuyu": "09:30", "Krisna": "09:30", "Ayuk": "06:30"},
+    "sabtu":  {"Dian": "LIBUR", "Yuyu": "08:30", "Krisna": "06:30", "Ayuk": "09:30"},
+    "minggu": {"Dian": "09:30", "Yuyu": "06:30", "Krisna": "LIBUR", "Ayuk": "08:30"},
 }
 
-# === TIM CHEF ===
+# ─────────────────────────────────────────────
+#  TIM CHEF
+# ─────────────────────────────────────────────
 CHEF = ["Adi", "Ucil", "Dito"]
-OFF_TETAP_CHEF = {
+
+# Hari libur tetap tiap chef (1x per minggu)
+LIBUR_TETAP_CHEF = {
     "senin":  "Ucil",
     "selasa": None,
     "rabu":   "Adi",
@@ -60,41 +70,56 @@ OFF_TETAP_CHEF = {
     "sabtu":  None,
     "minggu": None,
 }
-# Jadwal tetap Chef (bukan auto-generate, fixed dari foto)
+
+# Jadwal shift chef per hari (fixed)
 JADWAL_CHEF = {
-    "senin":  {"Adi": "06:30", "Ucil": "OFF", "Dito": "08:30"},
+    "senin":  {"Adi": "06:30", "Ucil": "LIBUR", "Dito": "08:00"},
     "selasa": {"Adi": "06:30", "Ucil": "09:30", "Dito": "08:00"},
-    "rabu":   {"Adi": "OFF",   "Ucil": "09:30", "Dito": "06:30"},
-    "kamis":  {"Adi": "09:30", "Ucil": "06:30", "Dito": "OFF"},
+    "rabu":   {"Adi": "LIBUR", "Ucil": "09:30", "Dito": "06:30"},
+    "kamis":  {"Adi": "09:30", "Ucil": "06:30", "Dito": "LIBUR"},
     "jumat":  {"Adi": "08:00", "Ucil": "06:30", "Dito": "09:30"},
     "sabtu":  {"Adi": "09:30", "Ucil": "08:00", "Dito": "06:30"},
     "minggu": {"Adi": "06:30", "Ucil": "09:30", "Dito": "08:00"},
 }
 
-# Legacy
-NAMA_VALID = BARISTA + CHEF  # untuk validasi command /libur dll
-SHIFT_3 = SHIFT_3_BARISTA
-SHIFT_2 = SHIFT_2_BARISTA
-OFF_TETAP = OFF_TETAP_BARISTA
+# Gabungan semua karyawan untuk validasi nama
+SEMUA_KARYAWAN = BARISTA + CHEF
 
 
-def is_admin(uid): return uid in ADMIN_IDS
+# ─────────────────────────────────────────────
+#  HELPER: ADMIN CHECK
+# ─────────────────────────────────────────────
+def is_admin(uid):
+    return uid in ADMIN_IDS
 
+
+# ─────────────────────────────────────────────
+#  HELPER: DATA STORAGE
+# ─────────────────────────────────────────────
 def load_data():
-    if os.path.exists(REQUESTS_FILE):
-        with open(REQUESTS_FILE) as f:
+    """Load semua data cuti & pembatalan libur tetap dari file JSON."""
+    if os.path.exists(DATA_FILE):
+        with open(DATA_FILE) as f:
             return json.load(f)
     return {}
 
 def save_data(data):
-    with open(REQUESTS_FILE, "w") as f:
+    """Simpan data ke file JSON."""
+    with open(DATA_FILE, "w") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
 
+
+# ─────────────────────────────────────────────
+#  HELPER: MINGGU TARGET
+# ─────────────────────────────────────────────
 def get_target_monday():
-    """Kalau hari ini Minggu → return Senin minggu depan. Selainnya → Senin minggu ini."""
-    today = datetime.now()
+    """
+    Kalau hari ini Minggu → jadwal yang dikelola adalah minggu depan.
+    Selain itu → jadwal minggu berjalan.
+    """
+    today  = datetime.now()
     monday = today - timedelta(days=today.weekday())
-    if today.weekday() == 6:  # 6 = Minggu
+    if today.weekday() == 6:  # Minggu
         monday += timedelta(weeks=1)
     return monday
 
@@ -104,154 +129,148 @@ def get_week_key():
 def get_week_data():
     return load_data().get(get_week_key(), {})
 
-def siapa_off(hari, week_data, tim="barista"):
-    """Return nama yang OFF di hari ini (OFF tetap atau request libur)."""
-    off_list = []
-    cancelled = week_data.get("cancelled_off", [])
-    off_tetap_map = OFF_TETAP_BARISTA if tim == "barista" else OFF_TETAP_CHEF
-    off_tetap = off_tetap_map.get(hari)
-    if off_tetap and f"{hari}_{off_tetap}" not in cancelled:
-        off_list.append(off_tetap)
-    # Request libur tambahan
+
+# ─────────────────────────────────────────────
+#  LOGIKA JADWAL
+# ─────────────────────────────────────────────
+def siapa_tidak_masuk(hari, week_data, tim="barista"):
+    """
+    Return list nama karyawan yang tidak masuk di hari ini.
+    Tidak masuk = libur tetap mingguan ATAU request cuti yang disetujui.
+    Libur tetap bisa dibatalkan admin (karyawan jadi masuk).
+    """
+    tidak_masuk = []
+    dibatalkan  = week_data.get("batal_libur_tetap", [])  # key: "hari_nama"
+
+    libur_tetap_map = LIBUR_TETAP_BARISTA if tim == "barista" else LIBUR_TETAP_CHEF
+    libur_tetap     = libur_tetap_map.get(hari)
+
+    # Masukkan libur tetap kalau belum dibatalkan admin
+    if libur_tetap and f"{hari}_{libur_tetap}" not in dibatalkan:
+        tidak_masuk.append(libur_tetap)
+
+    # Masukkan request cuti yang disetujui
     anggota = BARISTA if tim == "barista" else CHEF
-    for nama, hari_list in week_data.get("libur", {}).items():
-        if nama in anggota and hari in hari_list and nama not in off_list:
-            off_list.append(nama)
-    return off_list
+    for nama, hari_list in week_data.get("cuti", {}).items():
+        if nama in anggota and hari in hari_list and nama not in tidak_masuk:
+            tidak_masuk.append(nama)
 
-def hitung_shift_cancel_off(hari, nama_masuk_extra, week_data):
+    return tidak_masuk
+
+
+def buat_jadwal_barista(hari, week_data):
     """
-    Saat OFF tetap seseorang di-cancel → dia masuk di hari itu.
-    Shiftnya ditentukan dari logika: sehari setelah OFF tetapnya
-    (karena dia harusnya OFF hari ini, berarti kemarin = pagi, besok = siang,
-    tapi karena dia cancel OFF = masuk hari ini, dia dapat siang/09:30
-    karena posisinya adalah 'sehari setelah OFF' dari perspektif minggunya).
-    
-    Sederhana: kalau cancel OFF → shift siang (09:30), karena dia 'dipanggil masuk'
-    di hari yang harusnya OFF.
+    Return list {"nama": ..., "jam": ...} barista yang masuk hari ini.
+    Kalau ada karyawan cuti → shift orang yang masuk tetap sesuai jadwal base.
+    Kalau libur tetap dibatalkan → karyawan itu masuk shift 09:30.
     """
-    return "09:30"
-
-
-def buat_jadwal_hari(hari, week_data):
-    """Barista: Return list {"nama": ..., "jam": ...} untuk hari ini."""
-    off_list = siapa_off(hari, week_data, tim="barista")
-    cancelled = week_data.get("cancelled_off", [])
-    result = []
+    tidak_masuk = siapa_tidak_masuk(hari, week_data, tim="barista")
+    dibatalkan  = week_data.get("batal_libur_tetap", [])
+    result      = []
 
     for nama in BARISTA:
-        jam_base = JADWAL_BARISTA[hari][nama]
+        if nama in tidak_masuk:
+            continue  # Libur atau cuti → skip
 
-        if nama in off_list:
-            # OFF (baik tetap atau request libur) → skip
-            continue
+        jam_base    = JADWAL_BARISTA[hari][nama]
+        libur_tetap = LIBUR_TETAP_BARISTA.get(hari)
 
-        # Cek: apakah ini orang yang OFF tetapnya di-cancel (dia harusnya OFF tapi masuk)
-        off_tetap = OFF_TETAP_BARISTA.get(hari)
-        if off_tetap == nama and f"{hari}_{nama}" in cancelled:
-            # Cancel OFF → logika: dia masuk siang (09:30)
+        # Kasus: libur tetapnya dibatalkan admin → karyawan ini masuk shift siang
+        if libur_tetap == nama and f"{hari}_{nama}" in dibatalkan:
             result.append({"nama": nama, "jam": "09:30"})
             continue
 
-        # Cek: ada request libur dari orang lain → shift mungkin perlu adjust
-        # Tapi untuk sekarang, kalau ada request libur tambahan → pakai jadwal base dari JADWAL_BARISTA
-        # Kalau masuk normal → pakai jam dari jadwal tetap
-        if jam_base == "OFF":
-            # Harusnya OFF tetap tapi sudah di-cancel → handled di atas
-            # Kalau sampai sini, berarti logika salah, skip saja
+        # Kalau jadwal base-nya LIBUR tapi sudah ditangani di atas → skip (jaga-jaga)
+        if jam_base == "LIBUR":
             continue
 
         result.append({"nama": nama, "jam": jam_base})
 
-    # Handle request libur tambahan: kalau ada yang request libur di hari ini,
-    # shift orang yang masuk ikut logika: yang 'kehilangan teman' tetap pakai jam masing-masing
-    # (tidak ada auto-rebalance shift untuk request libur tambahan)
     return result
 
 
 def hitung_jadwal_chef_seminggu(week_data):
     """
-    Hitung jadwal Chef seminggu penuh:
-    - 3 orang masuk → jam: 06:30, 08:00, 09:30
-    - 2 orang masuk (ada 1 libur) → jam: 06:30, 09:30 (tidak ada 08:00)
-    Fairness: distribusi jam dirotasi merata antar Chef.
+    Hitung jadwal Chef untuk seminggu penuh dengan distribusi shift yang adil.
+    - 3 chef masuk → shift tersedia: 06:30, 08:00, 09:30
+    - 2 chef masuk (1 libur/cuti) → shift tersedia: 06:30, 09:30 (tanpa 08:00)
+    Rotasi fairness: yang paling sedikit dapat jam tertentu diprioritaskan.
     """
-    hasil = {hari: {} for hari in HARI_VALID}
-
-    # Tracking berapa kali dapat tiap jam (untuk fairness rotasi)
-    dapat = {nama: {"06:30": 0, "08:00": 0, "09:30": 0} for nama in CHEF}
+    hasil  = {hari: {} for hari in HARI_VALID}
+    dapat  = {nama: {"06:30": 0, "08:00": 0, "09:30": 0} for nama in CHEF}
 
     for hari in HARI_VALID:
-        off_list = siapa_off(hari, week_data, tim="chef")
-        masuk = [n for n in CHEF if n not in off_list]
+        tidak_masuk = siapa_tidak_masuk(hari, week_data, tim="chef")
+        masuk       = [n for n in CHEF if n not in tidak_masuk]
 
-        # Tandai yang OFF
-        for nama in off_list:
-            hasil[hari][nama] = "OFF"
+        # Tandai yang tidak masuk
+        for nama in tidak_masuk:
+            hasil[hari][nama] = "LIBUR"
 
+        # Tentukan shift tersedia berdasarkan jumlah yang masuk
         if len(masuk) == 3:
-            # 3 orang masuk → jam: 06:30, 08:00, 09:30
-            jam_tersedia = ["06:30", "08:00", "09:30"]
+            shift_tersedia = ["06:30", "08:00", "09:30"]
         else:
-            # 2 orang masuk → jam: 06:30, 09:30 saja
-            jam_tersedia = ["06:30", "09:30"]
+            shift_tersedia = ["06:30", "09:30"]
 
-        # Assign jam berdasarkan siapa yang paling sedikit dapat jam itu
-        jam_assigned = {}
+        # Assign shift: prioritaskan yang paling jarang dapat shift itu
         sisa_masuk = list(masuk)
-
-        for jam in jam_tersedia:
-            # Pilih orang yang paling sedikit dapat jam ini
+        for jam in shift_tersedia:
+            if not sisa_masuk:
+                break
             kandidat = sorted(sisa_masuk, key=lambda n: dapat[n][jam])
             terpilih = kandidat[0]
-            jam_assigned[terpilih] = jam
+            hasil[hari][terpilih] = jam
             dapat[terpilih][jam] += 1
             sisa_masuk.remove(terpilih)
-
-        for nama, jam in jam_assigned.items():
-            hasil[hari][nama] = jam
 
     return hasil
 
 
 def buat_jadwal_chef(hari, week_data, jadwal_seminggu=None):
     """
-    Return list {"nama": ..., "jam": ...} untuk hari ini.
-    Pakai jadwal_seminggu yang sudah dihitung fairness-nya kalau ada.
+    Return list {"nama": ..., "jam": ...} chef yang masuk hari ini.
+    Pakai jadwal_seminggu (pre-computed dengan fairness) kalau tersedia.
     """
     if jadwal_seminggu:
-        result = []
-        for nama in CHEF:
-            jam = jadwal_seminggu[hari].get(nama, "OFF")
-            if jam != "OFF":
-                result.append({"nama": nama, "jam": jam})
-        return result
+        return [
+            {"nama": nama, "jam": jadwal_seminggu[hari][nama]}
+            for nama in CHEF
+            if jadwal_seminggu[hari].get(nama, "LIBUR") != "LIBUR"
+        ]
 
-    # Fallback: tidak ada pre-computed (tidak seharusnya terjadi)
-    off_list = siapa_off(hari, week_data, tim="chef")
-    result = []
-    for nama in CHEF:
-        if nama not in off_list:
-            result.append({"nama": nama, "jam": JADWAL_CHEF[hari][nama]})
-    return result
+    # Fallback manual (tidak dipakai normalnya)
+    tidak_masuk = siapa_tidak_masuk(hari, week_data, tim="chef")
+    return [
+        {"nama": nama, "jam": JADWAL_CHEF[hari][nama]}
+        for nama in CHEF
+        if nama not in tidak_masuk
+    ]
 
 
+# ─────────────────────────────────────────────
+#  GENERATE PDF
+# ─────────────────────────────────────────────
 def generate_pdf(week_data):
     from reportlab.lib.pagesizes import A4
     from reportlab.lib import colors
     from reportlab.lib.units import cm
-    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, HRFlowable
+    from reportlab.platypus import (
+        SimpleDocTemplate, Table, TableStyle,
+        Paragraph, Spacer, HRFlowable
+    )
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 
+    # Palet warna
     BLACK      = colors.HexColor("#111111")
     DARK_GRAY  = colors.HexColor("#2D2D2D")
     MID_GRAY   = colors.HexColor("#757575")
     LIGHT_GRAY = colors.HexColor("#F7F7F7")
     WHITE      = colors.white
-    ACCENT_B   = colors.HexColor("#1A73E8")
-    ACCENT_C   = colors.HexColor("#E8711A")
-    RED        = colors.HexColor("#D32F2F")
-    AMBER      = colors.HexColor("#E65100")
+    ACCENT_B   = colors.HexColor("#1A73E8")   # biru untuk barista
+    ACCENT_C   = colors.HexColor("#E8711A")   # oranye untuk chef
+    RED        = colors.HexColor("#D32F2F")   # merah untuk libur tetap
+    AMBER      = colors.HexColor("#E65100")   # amber untuk cuti
     TODAY_BG   = colors.HexColor("#E8F0FE")
     BORDER     = colors.HexColor("#E0E0E0")
     HEADER_BG  = colors.HexColor("#FAFAFA")
@@ -259,34 +278,43 @@ def generate_pdf(week_data):
     today  = datetime.now()
     monday = get_target_monday()
     sunday = monday + timedelta(days=6)
-    tanggal = {HARI_VALID[i]: (monday + timedelta(days=i)).strftime("%d/%m") for i in range(7)}
+    tanggal = {
+        HARI_VALID[i]: (monday + timedelta(days=i)).strftime("%d/%m")
+        for i in range(7)
+    }
 
     pdf_path = "jadwal_cafe.pdf"
-    doc = SimpleDocTemplate(pdf_path, pagesize=A4,
-        topMargin=1.5*cm, bottomMargin=1.2*cm, leftMargin=1.5*cm, rightMargin=1.5*cm)
+    doc = SimpleDocTemplate(
+        pdf_path, pagesize=A4,
+        topMargin=1.5*cm, bottomMargin=1.2*cm,
+        leftMargin=1.5*cm, rightMargin=1.5*cm
+    )
 
     styles = getSampleStyleSheet()
     def ps(name, **kw):
         return ParagraphStyle(name, parent=styles["Normal"], **kw)
 
-    title_s = ps("t",  alignment=1, fontName="Helvetica-Bold", fontSize=22, textColor=BLACK, spaceAfter=3)
-    sub_s   = ps("s",  alignment=1, fontName="Helvetica", fontSize=10, textColor=MID_GRAY, spaceAfter=2)
-    gen_s   = ps("g",  alignment=1, fontName="Helvetica", fontSize=8,  textColor=MID_GRAY)
-    c_head  = ps("ch", alignment=1, fontName="Helvetica-Bold", textColor=WHITE, fontSize=9)
-    c_day   = ps("cd", alignment=1, fontName="Helvetica-Bold", textColor=DARK_GRAY, fontSize=8, leading=11)
-    c_norm  = ps("cn", alignment=1, fontName="Helvetica-Bold", fontSize=9, textColor=DARK_GRAY)
-    c_off   = ps("co", alignment=1, fontName="Helvetica-Bold", textColor=RED, fontSize=9)
-    c_libur = ps("cl", alignment=1, fontName="Helvetica-Bold", textColor=AMBER, fontSize=8)
-    c_leg   = ps("leg",alignment=1, fontName="Helvetica", fontSize=7, textColor=MID_GRAY)
+    title_s = ps("t",   alignment=1, fontName="Helvetica-Bold", fontSize=22, textColor=BLACK,     spaceAfter=3)
+    sub_s   = ps("s",   alignment=1, fontName="Helvetica",      fontSize=10, textColor=MID_GRAY,  spaceAfter=2)
+    gen_s   = ps("g",   alignment=1, fontName="Helvetica",      fontSize=8,  textColor=MID_GRAY)
+    c_head  = ps("ch",  alignment=1, fontName="Helvetica-Bold", fontSize=9,  textColor=WHITE)
+    c_day   = ps("cd",  alignment=1, fontName="Helvetica-Bold", fontSize=8,  textColor=DARK_GRAY, leading=11)
+    c_norm  = ps("cn",  alignment=1, fontName="Helvetica-Bold", fontSize=9,  textColor=DARK_GRAY)
+    c_libur = ps("cl",  alignment=1, fontName="Helvetica-Bold", fontSize=9,  textColor=RED)
+    c_cuti  = ps("cct", alignment=1, fontName="Helvetica-Bold", fontSize=8,  textColor=AMBER)
+    c_leg   = ps("leg", alignment=1, fontName="Helvetica",      fontSize=7,  textColor=MID_GRAY)
 
-    cancelled = week_data.get("cancelled_off", [])
+    dibatalkan   = week_data.get("batal_libur_tetap", [])
     is_next_week = today.weekday() == 6
-    today_row = -1 if is_next_week else (today.weekday() + 1)
-    pw = A4[0] - 3*cm
+    today_row    = -1 if is_next_week else (today.weekday() + 1)
+    pw           = A4[0] - 3*cm
 
     def section_header(label, accent):
-        t = Table([[Paragraph(f"<b>{label}</b>",
-                    ps("sh", fontName="Helvetica-Bold", fontSize=10, textColor=WHITE))]], colWidths=[pw])
+        t = Table(
+            [[Paragraph(f"<b>{label}</b>",
+              ps("sh", fontName="Helvetica-Bold", fontSize=10, textColor=WHITE))]],
+            colWidths=[pw]
+        )
         t.setStyle(TableStyle([
             ("BACKGROUND",    (0,0), (-1,-1), accent),
             ("LEFTPADDING",   (0,0), (-1,-1), 10),
@@ -295,30 +323,40 @@ def generate_pdf(week_data):
         ]))
         return t
 
-    def build_table(anggota, jadwal_fn, off_tetap_map, tim, accent):
-        header = [Paragraph("HARI", c_head)] + [Paragraph(n.upper(), c_head) for n in anggota]
+    def build_table(anggota, jadwal_fn, libur_tetap_map, tim, accent):
+        header = [Paragraph("HARI", c_head)] + [
+            Paragraph(n.upper(), c_head) for n in anggota
+        ]
         data = [header]
+
         for hari in HARI_VALID:
             jadwal_hari = jadwal_fn(hari, week_data)
-            off_list = siapa_off(hari, week_data, tim=tim)
+            tidak_masuk = siapa_tidak_masuk(hari, week_data, tim=tim)
             row = [Paragraph(
                 f"<b>{hari[:3].capitalize()}</b><br/>"
-                f"<font size='7' color='#757575'>{tanggal[hari]}</font>", c_day)]
+                f"<font size='7' color='#757575'>{tanggal[hari]}</font>",
+                c_day
+            )]
+
             for nama in anggota:
-                if nama in off_list:
-                    off_t = off_tetap_map.get(hari)
-                    if off_t == nama and f"{hari}_{nama}" not in cancelled:
-                        row.append(Paragraph("OFF", c_off))
+                if nama in tidak_masuk:
+                    libur_tetap = libur_tetap_map.get(hari)
+                    # Cek apakah ini libur tetap yang BELUM dibatalkan
+                    if libur_tetap == nama and f"{hari}_{nama}" not in dibatalkan:
+                        row.append(Paragraph("Libur", c_libur))
                     else:
-                        row.append(Paragraph("LIBUR", c_libur))
+                        # Request cuti (atau libur tetap yang sudah dibatalkan
+                        # tapi ada cuti lain — seharusnya tidak terjadi)
+                        row.append(Paragraph("Cuti", c_cuti))
                 else:
                     entry = next((j for j in jadwal_hari if j["nama"] == nama), None)
                     row.append(Paragraph(entry["jam"] if entry else "—", c_norm))
+
             data.append(row)
 
-        n = len(anggota)
+        n  = len(anggota)
         cw = [2.2*cm] + [(pw - 2.2*cm) / n] * n
-        t = Table(data, colWidths=cw, repeatRows=1)
+        t  = Table(data, colWidths=cw, repeatRows=1)
         cmds = [
             ("BACKGROUND",    (0,0),  (-1,0),  accent),
             ("ROWBACKGROUNDS",(1,1),  (-1,-1), [WHITE, LIGHT_GRAY]),
@@ -337,230 +375,306 @@ def generate_pdf(week_data):
         t.setStyle(TableStyle(cmds))
         return t
 
-    story = []
-    # Hitung jadwal Chef seminggu penuh dengan fairness 08:30
+    # Hitung jadwal Chef seminggu penuh (dengan rotasi fairness)
     jadwal_chef_minggu = hitung_jadwal_chef_seminggu(week_data)
-
     period = f"{monday.strftime('%d %b')} – {sunday.strftime('%d %b %Y')}"
-    story += [
-        Paragraph("Jadwal Kerja Café", title_s),
+
+    story = [
+        Paragraph("Jadwal Kerja Café Retri", title_s),
         Paragraph(period, sub_s),
-        Paragraph(f"Generated {today.strftime('%d/%m/%Y %H:%M')}", gen_s),
+        Paragraph(f"Dibuat: {today.strftime('%d/%m/%Y %H:%M')}", gen_s),
         Spacer(1, 0.4*cm),
         HRFlowable(width="100%", thickness=1.5, color=ACCENT_B, spaceAfter=4),
         Spacer(1, 0.2*cm),
         section_header("☕  BARISTA", ACCENT_B),
-        build_table(BARISTA, buat_jadwal_hari, OFF_TETAP_BARISTA, "barista", ACCENT_B),
+        build_table(BARISTA, buat_jadwal_barista, LIBUR_TETAP_BARISTA, "barista", ACCENT_B),
         Spacer(1, 0.35*cm),
         section_header("🍳  CHEF", ACCENT_C),
-        build_table(CHEF, lambda h, w: buat_jadwal_chef(h, w, jadwal_chef_minggu), OFF_TETAP_CHEF, "chef", ACCENT_C),
+        build_table(
+            CHEF,
+            lambda h, w: buat_jadwal_chef(h, w, jadwal_chef_minggu),
+            LIBUR_TETAP_CHEF, "chef", ACCENT_C
+        ),
         Spacer(1, 0.3*cm),
         HRFlowable(width="100%", thickness=0.5, color=BORDER),
         Spacer(1, 0.1*cm),
-        Paragraph("OFF = libur tetap  ·  LIBUR = request libur  ·  Baris biru = hari ini", c_leg),
+        Paragraph(
+            "Libur = libur tetap mingguan  ·  Cuti = request cuti  ·  Baris biru = hari ini",
+            c_leg
+        ),
     ]
     doc.build(story)
     return pdf_path
 
 
+# ─────────────────────────────────────────────
+#  HELPER: KIRIM PDF KE TELEGRAM
+# ─────────────────────────────────────────────
 async def kirim_pdf(update, context):
     week_data = get_week_data()
-    pdf_path = generate_pdf(week_data)
-    today  = datetime.now()
-    monday = get_target_monday()
+    pdf_path  = generate_pdf(week_data)
+    monday    = get_target_monday()
     with open(pdf_path, "rb") as f:
         await update.message.reply_document(
             document=f,
             filename=f"Jadwal_{monday.strftime('%d%b%Y')}.pdf",
-            caption=f"☕ Jadwal Cafe - Minggu {monday.strftime('%d %b %Y')}"
+            caption=f"☕ Jadwal Café Retri — Minggu {monday.strftime('%d %b %Y')}"
         )
 
 
+# ─────────────────────────────────────────────
+#  COMMAND: /start
+# ─────────────────────────────────────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     if is_admin(uid):
         msg = (
-            "☕ Cafe Schedule Bot — ADMIN\n\n"
-            "/libur [nama] [hari] — request libur\n"
-            "  contoh: /libur ayuk rabu\n\n"
-            "/batalkan [nama] [hari] — batalkan request libur\n\n"
-            "/canceloff [hari] [tim] — cancel OFF tetap\n"
-            "  contoh: /canceloff senin barista\n"
-            "  contoh: /canceloff rabu chef\n"
-            "  contoh: /canceloff senin  ← semua tim\n\n"
-            "/restoreoff [hari] [tim] — kembalikan OFF tetap\n"
-            "  contoh: /restoreoff senin barista\n\n"
-            "/liburlist — lihat semua request minggu ini\n"
-            "/jadwal — generate PDF jadwal"
+            "☕ Bot Jadwal Café Retri — ADMIN\n\n"
+            "📋 Perintah yang tersedia:\n\n"
+            "▸ /cuti [nama] [hari]\n"
+            "  Ajukan request cuti karyawan\n"
+            "  Contoh: /cuti ucil minggu\n\n"
+            "▸ /batalcuti [nama] [hari]\n"
+            "  Batalkan request cuti\n"
+            "  Contoh: /batalcuti ucil minggu\n\n"
+            "▸ /batallibur [hari] [tim]\n"
+            "  Batalkan libur tetap → karyawan masuk hari itu\n"
+            "  Contoh: /batallibur senin barista\n"
+            "  Contoh: /batallibur rabu chef\n"
+            "  Contoh: /batallibur senin  ← semua tim\n\n"
+            "▸ /pulihkanlibur [hari] [tim]\n"
+            "  Kembalikan libur tetap yang sudah dibatalkan\n"
+            "  Contoh: /pulihkanlibur senin barista\n\n"
+            "▸ /daftarcuti\n"
+            "  Lihat semua request cuti & perubahan libur minggu ini\n\n"
+            "▸ /jadwal\n"
+            "  Generate & kirim PDF jadwal minggu ini"
         )
     else:
-        msg = "☕ Cafe Schedule Bot\n\nHubungi owner untuk request libur."
+        msg = (
+            "☕ Bot Jadwal Café Retri\n\n"
+            "Untuk request cuti, hubungi owner atau admin."
+        )
     await update.message.reply_text(msg)
 
 
-async def libur(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ─────────────────────────────────────────────
+#  COMMAND: /cuti — request cuti karyawan
+# ─────────────────────────────────────────────
+async def cuti(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
-        await update.message.reply_text("❌ Hanya admin.")
+        await update.message.reply_text("❌ Perintah ini hanya untuk admin.")
         return
     if len(context.args) < 2:
-        await update.message.reply_text("Format: /libur [nama] [hari]\nContoh: /libur ayuk rabu")
+        await update.message.reply_text(
+            "Format: /cuti [nama] [hari]\n"
+            "Contoh: /cuti ucil minggu"
+        )
         return
 
-    nama = next((n for n in NAMA_VALID if n.lower() == context.args[0].lower()), None)
+    nama = next((n for n in SEMUA_KARYAWAN if n.lower() == context.args[0].lower()), None)
     hari = context.args[1].lower()
 
     if not nama:
-        await update.message.reply_text(f"❌ Nama tidak valid. Pilihan: {', '.join(NAMA_VALID)}")
+        await update.message.reply_text(
+            f"❌ Nama tidak dikenal.\n"
+            f"Pilihan: {', '.join(SEMUA_KARYAWAN)}"
+        )
         return
     if hari not in HARI_VALID:
-        await update.message.reply_text(f"❌ Hari tidak valid. Pilihan: {', '.join(HARI_VALID)}")
+        await update.message.reply_text(
+            f"❌ Hari tidak valid.\n"
+            f"Pilihan: {', '.join(HARI_VALID)}"
+        )
         return
 
-    week_key = get_week_key()
-    all_data = load_data()
+    week_key  = get_week_key()
+    all_data  = load_data()
     week_data = all_data.get(week_key, {})
+    tim       = "barista" if nama in BARISTA else "chef"
 
-    # Tentuin tim
-    tim = "barista" if nama in BARISTA else "chef"
-    off_tetap_map = OFF_TETAP_BARISTA if tim == "barista" else OFF_TETAP_CHEF
+    libur_tetap_map = LIBUR_TETAP_BARISTA if tim == "barista" else LIBUR_TETAP_CHEF
+    dibatalkan      = week_data.get("batal_libur_tetap", [])
 
-    # Cek sudah OFF tetap
-    off_tetap = off_tetap_map.get(hari)
-    cancelled = week_data.get("cancelled_off", [])
-    if off_tetap == nama and f"{hari}_{nama}" not in cancelled:
-        await update.message.reply_text(f"ℹ️ {nama} sudah OFF tetap di {hari.capitalize()}.")
+    # Cek: hari ini sudah libur tetap karyawan tersebut (dan belum dibatalkan)
+    libur_tetap = libur_tetap_map.get(hari)
+    if libur_tetap == nama and f"{hari}_{nama}" not in dibatalkan:
+        await update.message.reply_text(
+            f"ℹ️ {nama} sudah libur tetap di hari {hari.capitalize()}.\n"
+            f"Tidak perlu request cuti."
+        )
         return
 
-    # Cek konflik — sudah ada yang libur di hari ini (dalam tim yang sama)?
-    off_list = siapa_off(hari, week_data, tim=tim)
-    if off_list:
-        konflik = off_list[0]
-        # Cari hari lain yang bisa
-        hari_bebas = []
+    # Cek: sudah ada karyawan lain yang tidak masuk di hari itu (tim yang sama)
+    tidak_masuk = siapa_tidak_masuk(hari, week_data, tim=tim)
+    if tidak_masuk:
+        konflik = tidak_masuk[0]
+        # Cari hari alternatif yang kosong untuk nama ini
+        hari_tersedia = []
         for h in HARI_VALID:
-            ol = siapa_off(h, week_data, tim=tim)
-            off_t = off_tetap_map.get(h)
-            if off_t == nama:
-                continue
-            if not ol and h != hari:
-                hari_bebas.append(h.capitalize())
-        saran = f"\n\n💡 Hari available untuk {nama}: {', '.join(hari_bebas)}" if hari_bebas else ""
+            tm = siapa_tidak_masuk(h, week_data, tim=tim)
+            lt = libur_tetap_map.get(h)
+            if lt == nama:
+                continue  # Hari libur tetap dia sendiri, skip
+            if not tm and h != hari:
+                hari_tersedia.append(h.capitalize())
+        saran = (
+            f"\n\n💡 Hari yang tersedia untuk cuti {nama}:\n"
+            f"{', '.join(hari_tersedia)}"
+        ) if hari_tersedia else ""
         await update.message.reply_text(
-            f"❌ {konflik} sudah libur di {hari.capitalize()}.\nMaks 1 karyawan libur per hari.{saran}"
+            f"❌ {konflik} sudah tidak masuk di {hari.capitalize()}.\n"
+            f"Maksimal 1 karyawan cuti/libur per hari per tim.{saran}"
         )
         return
 
-    # Simpan
-    week_data.setdefault("libur", {}).setdefault(nama, [])
-    if hari in week_data["libur"][nama]:
-        await update.message.reply_text(f"ℹ️ {nama} sudah request libur {hari.capitalize()}.")
+    # Simpan request cuti
+    week_data.setdefault("cuti", {}).setdefault(nama, [])
+    if hari in week_data["cuti"][nama]:
+        await update.message.reply_text(
+            f"ℹ️ {nama} sudah punya request cuti di {hari.capitalize()}."
+        )
         return
-    week_data["libur"][nama].append(hari)
+
+    week_data["cuti"][nama].append(hari)
     all_data[week_key] = week_data
     save_data(all_data)
 
-    await update.message.reply_text(f"✅ Libur {hari.capitalize()} untuk {nama} tercatat!\nGenerating jadwal...")
+    await update.message.reply_text(
+        f"✅ Cuti {hari.capitalize()} untuk {nama} berhasil dicatat!\n"
+        f"Generating jadwal..."
+    )
     await kirim_pdf(update, context)
 
 
-async def batalkan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ─────────────────────────────────────────────
+#  COMMAND: /batalcuti — batalkan request cuti
+# ─────────────────────────────────────────────
+async def batalcuti(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
-        await update.message.reply_text("❌ Hanya admin.")
+        await update.message.reply_text("❌ Perintah ini hanya untuk admin.")
         return
     if len(context.args) < 2:
-        await update.message.reply_text("Format: /batalkan [nama] [hari]")
-        return
-
-    nama = next((n for n in NAMA_VALID if n.lower() == context.args[0].lower()), None)
-    hari = context.args[1].lower()
-    if not nama:
-        await update.message.reply_text(f"❌ Nama tidak valid.")
-        return
-
-    week_key = get_week_key()
-    all_data = load_data()
-    week_data = all_data.get(week_key, {})
-
-    if hari not in week_data.get("libur", {}).get(nama, []):
-        await update.message.reply_text(f"ℹ️ Tidak ada request libur {hari} untuk {nama}.")
-        return
-
-    week_data["libur"][nama].remove(hari)
-    if not week_data["libur"][nama]:
-        del week_data["libur"][nama]
-    all_data[week_key] = week_data
-    save_data(all_data)
-
-    await update.message.reply_text(f"✅ Request libur {hari.capitalize()} untuk {nama} dibatalkan.\nGenerating jadwal...")
-    await kirim_pdf(update, context)
-
-
-async def canceloff(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("❌ Hanya admin.")
-        return
-    if not context.args:
         await update.message.reply_text(
-            "Format: /canceloff [hari] [tim]\n"
-            "Contoh: /canceloff senin barista\n"
-            "        /canceloff senin chef\n"
-            "        /canceloff senin  ← cancel semua tim di hari itu"
+            "Format: /batalcuti [nama] [hari]\n"
+            "Contoh: /batalcuti ucil minggu"
         )
         return
 
-    hari = context.args[0].lower()
-    tim_filter = context.args[1].lower() if len(context.args) > 1 else "semua"
+    nama = next((n for n in SEMUA_KARYAWAN if n.lower() == context.args[0].lower()), None)
+    hari = context.args[1].lower()
 
-    if hari not in HARI_VALID:
-        await update.message.reply_text("❌ Hari tidak valid.")
-        return
-    if tim_filter not in ("barista", "chef", "semua"):
-        await update.message.reply_text("❌ Tim tidak valid. Pilihan: barista / chef")
+    if not nama:
+        await update.message.reply_text("❌ Nama tidak dikenal.")
         return
 
-    kandidat = []
-    if tim_filter in ("barista", "semua"):
-        off = OFF_TETAP_BARISTA.get(hari)
-        if off: kandidat.append(off)
-    if tim_filter in ("chef", "semua"):
-        off = OFF_TETAP_CHEF.get(hari)
-        if off: kandidat.append(off)
-
-    if not kandidat:
-        await update.message.reply_text(f"ℹ️ Tidak ada OFF tetap di {hari.capitalize()} untuk tim yang dipilih.")
-        return
-
-    week_key = get_week_key()
-    all_data = load_data()
+    week_key  = get_week_key()
+    all_data  = load_data()
     week_data = all_data.get(week_key, {})
-    cancelled = week_data.get("cancelled_off", [])
 
-    msg_parts = []
-    for off_tetap in kandidat:
-        key = f"{hari}_{off_tetap}"
-        if key in cancelled:
-            msg_parts.append(f"ℹ️ OFF {off_tetap} di {hari.capitalize()} sudah di-cancel sebelumnya.")
-        else:
-            cancelled.append(key)
-            msg_parts.append(f"✅ {off_tetap} di-cancel OFF → sekarang masuk {hari.capitalize()}.")
+    if hari not in week_data.get("cuti", {}).get(nama, []):
+        await update.message.reply_text(
+            f"ℹ️ Tidak ada request cuti {hari.capitalize()} untuk {nama}."
+        )
+        return
 
-    week_data["cancelled_off"] = cancelled
+    week_data["cuti"][nama].remove(hari)
+    if not week_data["cuti"][nama]:
+        del week_data["cuti"][nama]
     all_data[week_key] = week_data
     save_data(all_data)
 
-    await update.message.reply_text("\n".join(msg_parts) + "\nGenerating jadwal...")
+    await update.message.reply_text(
+        f"✅ Request cuti {hari.capitalize()} untuk {nama} dibatalkan.\n"
+        f"Generating jadwal..."
+    )
     await kirim_pdf(update, context)
 
 
-async def restoreoff(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ─────────────────────────────────────────────
+#  COMMAND: /batallibur — batalkan libur tetap
+#  (karyawan jadi masuk di hari itu)
+# ─────────────────────────────────────────────
+async def batallibur(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
-        await update.message.reply_text("❌ Hanya admin.")
+        await update.message.reply_text("❌ Perintah ini hanya untuk admin.")
         return
     if not context.args:
-        await update.message.reply_text("Format: /restoreoff [hari]\nContoh: /restoreoff senin")
+        await update.message.reply_text(
+            "Format: /batallibur [hari] [tim]\n"
+            "Contoh: /batallibur senin barista\n"
+            "        /batallibur rabu chef\n"
+            "        /batallibur senin  ← batalkan semua tim di hari itu"
+        )
         return
 
-    hari = context.args[0].lower()
+    hari       = context.args[0].lower()
+    tim_filter = context.args[1].lower() if len(context.args) > 1 else "semua"
+
+    if hari not in HARI_VALID:
+        await update.message.reply_text("❌ Hari tidak valid.")
+        return
+    if tim_filter not in ("barista", "chef", "semua"):
+        await update.message.reply_text("❌ Tim tidak valid. Pilihan: barista / chef")
+        return
+
+    # Kumpulkan karyawan yang punya libur tetap di hari ini sesuai filter
+    kandidat = []
+    if tim_filter in ("barista", "semua"):
+        lt = LIBUR_TETAP_BARISTA.get(hari)
+        if lt: kandidat.append(lt)
+    if tim_filter in ("chef", "semua"):
+        lt = LIBUR_TETAP_CHEF.get(hari)
+        if lt: kandidat.append(lt)
+
+    if not kandidat:
+        await update.message.reply_text(
+            f"ℹ️ Tidak ada libur tetap di {hari.capitalize()} untuk tim yang dipilih."
+        )
+        return
+
+    week_key   = get_week_key()
+    all_data   = load_data()
+    week_data  = all_data.get(week_key, {})
+    dibatalkan = week_data.get("batal_libur_tetap", [])
+
+    msg_parts = []
+    for nama in kandidat:
+        key = f"{hari}_{nama}"
+        if key in dibatalkan:
+            msg_parts.append(
+                f"ℹ️ Libur tetap {nama} di {hari.capitalize()} sudah dibatalkan sebelumnya."
+            )
+        else:
+            dibatalkan.append(key)
+            msg_parts.append(
+                f"✅ Libur tetap {nama} dibatalkan → {nama} masuk di {hari.capitalize()} (shift 09:30)."
+            )
+
+    week_data["batal_libur_tetap"] = dibatalkan
+    all_data[week_key] = week_data
+    save_data(all_data)
+
+    await update.message.reply_text("\n".join(msg_parts) + "\nGenerating jadwal...")
+    await kirim_pdf(update, context)
+
+
+# ─────────────────────────────────────────────
+#  COMMAND: /pulihkanlibur — kembalikan libur tetap
+#  yang sebelumnya dibatalkan
+# ─────────────────────────────────────────────
+async def pulihkanlibur(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ Perintah ini hanya untuk admin.")
+        return
+    if not context.args:
+        await update.message.reply_text(
+            "Format: /pulihkanlibur [hari] [tim]\n"
+            "Contoh: /pulihkanlibur senin barista"
+        )
+        return
+
+    hari       = context.args[0].lower()
     tim_filter = context.args[1].lower() if len(context.args) > 1 else "semua"
 
     if hari not in HARI_VALID:
@@ -572,31 +686,37 @@ async def restoreoff(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     kandidat = []
     if tim_filter in ("barista", "semua"):
-        off = OFF_TETAP_BARISTA.get(hari)
-        if off: kandidat.append(off)
+        lt = LIBUR_TETAP_BARISTA.get(hari)
+        if lt: kandidat.append(lt)
     if tim_filter in ("chef", "semua"):
-        off = OFF_TETAP_CHEF.get(hari)
-        if off: kandidat.append(off)
+        lt = LIBUR_TETAP_CHEF.get(hari)
+        if lt: kandidat.append(lt)
 
     if not kandidat:
-        await update.message.reply_text(f"ℹ️ Tidak ada OFF tetap di {hari.capitalize()} untuk tim yang dipilih.")
+        await update.message.reply_text(
+            f"ℹ️ Tidak ada libur tetap di {hari.capitalize()} untuk tim yang dipilih."
+        )
         return
 
-    week_key = get_week_key()
-    all_data = load_data()
-    week_data = all_data.get(week_key, {})
-    cancelled = week_data.get("cancelled_off", [])
+    week_key   = get_week_key()
+    all_data   = load_data()
+    week_data  = all_data.get(week_key, {})
+    dibatalkan = week_data.get("batal_libur_tetap", [])
 
     msg_parts = []
-    for off_tetap in kandidat:
-        key = f"{hari}_{off_tetap}"
-        if key not in cancelled:
-            msg_parts.append(f"ℹ️ OFF {off_tetap} di {hari.capitalize()} belum di-cancel.")
+    for nama in kandidat:
+        key = f"{hari}_{nama}"
+        if key not in dibatalkan:
+            msg_parts.append(
+                f"ℹ️ Libur tetap {nama} di {hari.capitalize()} belum pernah dibatalkan."
+            )
         else:
-            cancelled.remove(key)
-            msg_parts.append(f"✅ OFF {off_tetap} di {hari.capitalize()} dikembalikan!")
+            dibatalkan.remove(key)
+            msg_parts.append(
+                f"✅ Libur tetap {nama} di {hari.capitalize()} dipulihkan kembali."
+            )
 
-    week_data["cancelled_off"] = cancelled
+    week_data["batal_libur_tetap"] = dibatalkan
     all_data[week_key] = week_data
     save_data(all_data)
 
@@ -604,51 +724,67 @@ async def restoreoff(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await kirim_pdf(update, context)
 
 
-async def liburlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ─────────────────────────────────────────────
+#  COMMAND: /daftarcuti — lihat status minggu ini
+# ─────────────────────────────────────────────
+async def daftarcuti(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
-        await update.message.reply_text("❌ Hanya admin.")
+        await update.message.reply_text("❌ Perintah ini hanya untuk admin.")
         return
-    week_data = get_week_data()
-    libur_req = week_data.get("libur", {})
-    cancelled = week_data.get("cancelled_off", [])
+
+    week_data  = get_week_data()
+    cuti_req   = week_data.get("cuti", {})
+    dibatalkan = week_data.get("batal_libur_tetap", [])
 
     msg = "📋 Status Minggu Ini:\n\n"
 
-    if libur_req:
-        msg += "Request Libur:\n"
-        for nama, hari_list in libur_req.items():
-            msg += f"- {nama}: {', '.join([h.capitalize() for h in hari_list])}\n"
+    if cuti_req:
+        msg += "Request Cuti yang Disetujui:\n"
+        for nama, hari_list in cuti_req.items():
+            hari_str = ", ".join(h.capitalize() for h in hari_list)
+            msg += f"  • {nama}: {hari_str}\n"
     else:
-        msg += "Belum ada request libur.\n"
+        msg += "Belum ada request cuti minggu ini.\n"
 
-    if cancelled:
-        msg += "\nOFF Tetap yang Di-cancel:\n"
-        for c in cancelled:
-            hari, nama = c.split("_", 1)
-            msg += f"- {nama} masuk di {hari.capitalize()}\n"
+    if dibatalkan:
+        msg += "\nLibur Tetap yang Dibatalkan (karyawan jadi masuk):\n"
+        for item in dibatalkan:
+            hari, nama = item.split("_", 1)
+            msg += f"  • {nama} masuk di {hari.capitalize()}\n"
+    else:
+        msg += "\nTidak ada perubahan libur tetap minggu ini.\n"
 
     await update.message.reply_text(msg)
 
 
+# ─────────────────────────────────────────────
+#  COMMAND: /jadwal — generate PDF jadwal
+# ─────────────────────────────────────────────
 async def jadwal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
-        await update.message.reply_text("❌ Hanya admin.")
+        await update.message.reply_text("❌ Perintah ini hanya untuk admin.")
         return
-    await update.message.reply_text("Generating jadwal...")
+    await update.message.reply_text("⏳ Generating jadwal, sebentar...")
     await kirim_pdf(update, context)
 
 
+# ─────────────────────────────────────────────
+#  MAIN
+# ─────────────────────────────────────────────
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("libur", libur))
-    app.add_handler(CommandHandler("batalkan", batalkan))
-    app.add_handler(CommandHandler("canceloff", canceloff))
-    app.add_handler(CommandHandler("restoreoff", restoreoff))
-    app.add_handler(CommandHandler("liburlist", liburlist))
-    app.add_handler(CommandHandler("jadwal", jadwal_cmd))
-    logger.info("Bot running...")
+
+    app.add_handler(CommandHandler("start",         start))
+    app.add_handler(CommandHandler("cuti",          cuti))
+    app.add_handler(CommandHandler("batalcuti",     batalcuti))
+    app.add_handler(CommandHandler("batallibur",    batallibur))
+    app.add_handler(CommandHandler("pulihkanlibur", pulihkanlibur))
+    app.add_handler(CommandHandler("daftarcuti",    daftarcuti))
+    app.add_handler(CommandHandler("jadwal",        jadwal_cmd))
+
+    logger.info("Bot Jadwal Café Retri berjalan...")
     app.run_polling()
+
 
 if __name__ == "__main__":
     main()
