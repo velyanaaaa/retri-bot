@@ -138,9 +138,21 @@ def siapa_tidak_masuk(hari, week_data, tim="barista"):
     libur_tetap_map = LIBUR_TETAP_BARISTA if tim == "barista" else LIBUR_TETAP_CHEF
     libur_tetap     = libur_tetap_map.get(hari)
 
-    # Masukkan libur tetap kalau belum dibatalkan admin
+    # Cek apakah libur tetap hari ini dipindah ke hari lain minggu ini
+    # Format: {"Yuyu": "kamis"} → Yuyu pindah libur dari hari asli ke Kamis
+    pindah_libur = week_data.get("pindah_libur", {})
+
     if libur_tetap and f"{hari}_{libur_tetap}" not in dibatalkan:
-        tidak_masuk.append(libur_tetap)
+        if libur_tetap in pindah_libur:
+            pass  # hari asli: dia masuk karena liburnya dipindah
+        else:
+            tidak_masuk.append(libur_tetap)
+
+    # Kalau hari ini adalah hari libur pindahan → tambahkan ke tidak_masuk
+    anggota_tim = BARISTA if tim == "barista" else CHEF
+    for nama_pindah, hari_baru in pindah_libur.items():
+        if hari_baru == hari and nama_pindah in anggota_tim and nama_pindah not in tidak_masuk:
+            tidak_masuk.append(nama_pindah)
 
     # Masukkan request cuti yang disetujui
     anggota = BARISTA if tim == "barista" else CHEF
@@ -514,6 +526,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "▸ /batalcuti [nama] [hari]\n"
             "  Batalkan request cuti\n"
             "  Contoh: /batalcuti ucil minggu\n\n"
+            "▸ /pindahlibur [nama] [hari_baru]\n"
+            "  Pindah hari libur tetap karyawan (bukan cuti)\n"
+            "  Contoh: /pindahlibur yuyu kamis\n\n"
             "▸ /batallibur [hari] [tim]\n"
             "  Batalkan libur tetap → karyawan masuk hari itu\n"
             "  Contoh: /batallibur senin barista\n"
@@ -802,6 +817,74 @@ async def pulihkanlibur(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ─────────────────────────────────────────────
+#  COMMAND: /pindahlibur — pindah hari libur tetap
+#  Bukan cuti, ini geser hari libur tetap ke hari lain
+# ─────────────────────────────────────────────
+async def pindahlibur(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ Perintah ini hanya untuk admin.")
+        return
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            "Format: /pindahlibur [nama] [hari_baru]\n"
+            "Contoh: /pindahlibur yuyu kamis\n\n"
+            "Libur tetap karyawan dipindah ke hari lain untuk minggu ini.\n"
+            "Hari aslinya dia masuk, hari baru dia libur."
+        )
+        return
+
+    nama     = next((n for n in SEMUA_KARYAWAN if n.lower() == context.args[0].lower()), None)
+    hari_baru = context.args[1].lower()
+
+    if not nama:
+        await update.message.reply_text(f"❌ Nama tidak dikenal.\nPilihan: {', '.join(SEMUA_KARYAWAN)}")
+        return
+    if hari_baru not in HARI_VALID:
+        await update.message.reply_text(f"❌ Hari tidak valid.\nPilihan: {', '.join(HARI_VALID)}")
+        return
+
+    tim             = "barista" if nama in BARISTA else "chef"
+    libur_tetap_map = LIBUR_TETAP_BARISTA if tim == "barista" else LIBUR_TETAP_CHEF
+
+    # Cari hari libur tetap asli karyawan ini
+    hari_asli = next((h for h, n in libur_tetap_map.items() if n == nama), None)
+    if not hari_asli:
+        await update.message.reply_text(f"ℹ️ {nama} tidak punya libur tetap mingguan.")
+        return
+    if hari_baru == hari_asli:
+        await update.message.reply_text(f"ℹ️ {nama} memang sudah libur di {hari_asli.capitalize()}.")
+        return
+
+    week_key  = get_week_key()
+    all_data  = load_data()
+    week_data = all_data.get(week_key, {})
+
+    # Cek: sudah ada karyawan lain yang tidak masuk di hari_baru (tim yang sama)
+    tidak_masuk_di_hari_baru = siapa_tidak_masuk(hari_baru, week_data, tim=tim)
+    # Filter: keluarkan nama itu sendiri dari pengecekan (kalau sebelumnya udah dipindah ke sini)
+    konflik = [n for n in tidak_masuk_di_hari_baru if n != nama]
+    if konflik:
+        await update.message.reply_text(
+            f"❌ {konflik[0]} sudah tidak masuk di {hari_baru.capitalize()}.\n"
+            f"Maksimal 1 karyawan libur per hari per tim.\n\n"
+            f"💡 Hari libur asli {nama}: {hari_asli.capitalize()}"
+        )
+        return
+
+    # Simpan perpindahan libur
+    week_data.setdefault("pindah_libur", {})[nama] = hari_baru
+    all_data[week_key] = week_data
+    save_data(all_data)
+
+    await update.message.reply_text(
+        f"✅ Libur {nama} dipindah: {hari_asli.capitalize()} → {hari_baru.capitalize()}\n"
+        f"Minggu ini {nama} masuk di {hari_asli.capitalize()} dan libur di {hari_baru.capitalize()}.\n"
+        f"Generating jadwal..."
+    )
+    await kirim_pdf(update, context)
+
+
+# ─────────────────────────────────────────────
 #  COMMAND: /daftarcuti — lihat status minggu ini
 # ─────────────────────────────────────────────
 async def daftarcuti(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -823,13 +906,22 @@ async def daftarcuti(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         msg += "Belum ada request cuti minggu ini.\n"
 
+    pindah_req = week_data.get("pindah_libur", {})
+    if pindah_req:
+        msg += "\nLibur Tetap yang Dipindah:\n"
+        for nama_p, hari_baru_p in pindah_req.items():
+            tim_p           = "barista" if nama_p in BARISTA else "chef"
+            libur_tetap_map = LIBUR_TETAP_BARISTA if tim_p == "barista" else LIBUR_TETAP_CHEF
+            hari_asli_p     = next((h for h, n in libur_tetap_map.items() if n == nama_p), "?")
+            msg += f"  • {nama_p}: {hari_asli_p.capitalize()} → {hari_baru_p.capitalize()}\n"
+    else:
+        msg += "\nTidak ada perpindahan libur minggu ini.\n"
+
     if dibatalkan:
         msg += "\nLibur Tetap yang Dibatalkan (karyawan jadi masuk):\n"
         for item in dibatalkan:
             hari, nama = item.split("_", 1)
             msg += f"  • {nama} masuk di {hari.capitalize()}\n"
-    else:
-        msg += "\nTidak ada perubahan libur tetap minggu ini.\n"
 
     await update.message.reply_text(msg)
 
@@ -854,6 +946,7 @@ def main():
     app.add_handler(CommandHandler("start",         start))
     app.add_handler(CommandHandler("cuti",          cuti))
     app.add_handler(CommandHandler("batalcuti",     batalcuti))
+    app.add_handler(CommandHandler("pindahlibur",   pindahlibur))
     app.add_handler(CommandHandler("batallibur",    batallibur))
     app.add_handler(CommandHandler("pulihkanlibur", pulihkanlibur))
     app.add_handler(CommandHandler("daftarcuti",    daftarcuti))
