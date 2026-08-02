@@ -62,13 +62,13 @@ OFF_TETAP_CHEF = {
 }
 # Jadwal tetap Chef (bukan auto-generate, fixed dari foto)
 JADWAL_CHEF = {
-    "senin":  {"Adi": "09:30", "Ucil": "OFF", "Dito": "06:30"},
+    "senin":  {"Adi": "06:30", "Ucil": "OFF", "Dito": "08:30"},
     "selasa": {"Adi": "06:30", "Ucil": "09:30", "Dito": "08:00"},
     "rabu":   {"Adi": "OFF",   "Ucil": "09:30", "Dito": "06:30"},
     "kamis":  {"Adi": "09:30", "Ucil": "06:30", "Dito": "OFF"},
     "jumat":  {"Adi": "08:00", "Ucil": "06:30", "Dito": "09:30"},
     "sabtu":  {"Adi": "09:30", "Ucil": "08:00", "Dito": "06:30"},
-    "minggu": {"Adi": "08:00", "Ucil": "06:30", "Dito": "09:30"},
+    "minggu": {"Adi": "06:30", "Ucil": "09:30", "Dito": "08:00"},
 }
 
 # Legacy
@@ -169,16 +169,70 @@ def buat_jadwal_hari(hari, week_data):
     return result
 
 
-def buat_jadwal_chef(hari, week_data):
-    """Chef: Return list {"nama": ..., "jam": ...} untuk hari ini."""
+def hitung_jadwal_chef_seminggu(week_data):
+    """
+    Hitung jadwal Chef seminggu penuh:
+    - 3 orang masuk → jam: 06:30, 08:00, 09:30
+    - 2 orang masuk (ada 1 libur) → jam: 06:30, 09:30 (tidak ada 08:00)
+    Fairness: distribusi jam dirotasi merata antar Chef.
+    """
+    hasil = {hari: {} for hari in HARI_VALID}
+
+    # Tracking berapa kali dapat tiap jam (untuk fairness rotasi)
+    dapat = {nama: {"06:30": 0, "08:00": 0, "09:30": 0} for nama in CHEF}
+
+    for hari in HARI_VALID:
+        off_list = siapa_off(hari, week_data, tim="chef")
+        masuk = [n for n in CHEF if n not in off_list]
+
+        # Tandai yang OFF
+        for nama in off_list:
+            hasil[hari][nama] = "OFF"
+
+        if len(masuk) == 3:
+            # 3 orang masuk → jam: 06:30, 08:00, 09:30
+            jam_tersedia = ["06:30", "08:00", "09:30"]
+        else:
+            # 2 orang masuk → jam: 06:30, 09:30 saja
+            jam_tersedia = ["06:30", "09:30"]
+
+        # Assign jam berdasarkan siapa yang paling sedikit dapat jam itu
+        jam_assigned = {}
+        sisa_masuk = list(masuk)
+
+        for jam in jam_tersedia:
+            # Pilih orang yang paling sedikit dapat jam ini
+            kandidat = sorted(sisa_masuk, key=lambda n: dapat[n][jam])
+            terpilih = kandidat[0]
+            jam_assigned[terpilih] = jam
+            dapat[terpilih][jam] += 1
+            sisa_masuk.remove(terpilih)
+
+        for nama, jam in jam_assigned.items():
+            hasil[hari][nama] = jam
+
+    return hasil
+
+
+def buat_jadwal_chef(hari, week_data, jadwal_seminggu=None):
+    """
+    Return list {"nama": ..., "jam": ...} untuk hari ini.
+    Pakai jadwal_seminggu yang sudah dihitung fairness-nya kalau ada.
+    """
+    if jadwal_seminggu:
+        result = []
+        for nama in CHEF:
+            jam = jadwal_seminggu[hari].get(nama, "OFF")
+            if jam != "OFF":
+                result.append({"nama": nama, "jam": jam})
+        return result
+
+    # Fallback: tidak ada pre-computed (tidak seharusnya terjadi)
     off_list = siapa_off(hari, week_data, tim="chef")
     result = []
     for nama in CHEF:
-        jam_tetap = JADWAL_CHEF[hari][nama]
-        if nama in off_list:
-            continue  # OFF, skip
-        # Cek apakah OFF tetap di-cancel → tetap pakai jam dari JADWAL_CHEF
-        result.append({"nama": nama, "jam": jam_tetap})
+        if nama not in off_list:
+            result.append({"nama": nama, "jam": JADWAL_CHEF[hari][nama]})
     return result
 
 
@@ -284,6 +338,9 @@ def generate_pdf(week_data):
         return t
 
     story = []
+    # Hitung jadwal Chef seminggu penuh dengan fairness 08:30
+    jadwal_chef_minggu = hitung_jadwal_chef_seminggu(week_data)
+
     period = f"{monday.strftime('%d %b')} – {sunday.strftime('%d %b %Y')}"
     story += [
         Paragraph("Jadwal Kerja Café", title_s),
@@ -296,7 +353,7 @@ def generate_pdf(week_data):
         build_table(BARISTA, buat_jadwal_hari, OFF_TETAP_BARISTA, "barista", ACCENT_B),
         Spacer(1, 0.35*cm),
         section_header("🍳  CHEF", ACCENT_C),
-        build_table(CHEF, buat_jadwal_chef, OFF_TETAP_CHEF, "chef", ACCENT_C),
+        build_table(CHEF, lambda h, w: buat_jadwal_chef(h, w, jadwal_chef_minggu), OFF_TETAP_CHEF, "chef", ACCENT_C),
         Spacer(1, 0.3*cm),
         HRFlowable(width="100%", thickness=0.5, color=BORDER),
         Spacer(1, 0.1*cm),
