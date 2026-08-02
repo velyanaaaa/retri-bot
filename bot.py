@@ -422,15 +422,17 @@ def generate_pdf(week_data):
                 c_day
             )]
 
+            pindah_libur = week_data.get("pindah_libur", {})
             for nama in anggota:
                 if nama in tidak_masuk:
                     libur_tetap = libur_tetap_map.get(hari)
-                    # Cek apakah ini libur tetap yang BELUM dibatalkan
+                    # Libur tetap normal (belum dibatalkan)
                     if libur_tetap == nama and f"{hari}_{nama}" not in dibatalkan:
                         row.append(Paragraph("Libur", c_libur))
+                    # Hari ini adalah hari pindahan libur karyawan ini
+                    elif pindah_libur.get(nama) == hari:
+                        row.append(Paragraph("Libur", c_libur))
                     else:
-                        # Request cuti (atau libur tetap yang sudah dibatalkan
-                        # tapi ada cuti lain — seharusnya tidak terjadi)
                         row.append(Paragraph("Cuti", c_cuti))
                 else:
                     entry = next((j for j in jadwal_hari if j["nama"] == nama), None)
