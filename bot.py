@@ -1,17 +1,9 @@
 """
-Bot Jadwal Café Retri
-======================
-Terminologi:
-- "Libur" = hari libur tetap mingguan karyawan (setiap karyawan dapat 1x/minggu)
-- "Cuti"  = request tidak masuk di luar hari libur tetap (perlu disetujui admin)
-
-Logika shift:
-- Barista 4 orang masuk semua  → 2 shift: 06:30 & 09:30 (pasangan tetap)
-- Barista 3 orang masuk (1 libur/cuti) → 3 shift: 06:30, 08:30, 09:30
-- Chef 3 orang masuk semua → 3 shift: 06:30, 08:00, 09:30
-- Chef 2 orang masuk (1 libur/cuti) → 2 shift: 06:30, 09:30 (tanpa 08:00)
-- Maks 1 karyawan libur/cuti per hari per tim
-- Admin bisa batalkan libur tetap → hari itu karyawan masuk
+Bot Café Retri — Jadwal + Overtime (1 file)
+=============================================
+Gabungan bot jadwal shift & bot overtime karyawan.
+- Command jadwal (/jadwal, /cuti, dst) → generate PDF jadwal
+- Command overtime (/ot, /rekap, /history, dst) → generate PDF overtime
 """
 
 import os, json, logging
@@ -22,9 +14,10 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-BOT_TOKEN  = os.environ.get("BOT_TOKEN")
-DATA_FILE  = "cuti_requests.json"
-ADMIN_IDS  = [int(x) for x in os.environ.get("ADMIN_IDS", "").split(",") if x.strip()]
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+ADMIN_IDS = [int(x) for x in os.environ.get("ADMIN_IDS", "").split(",") if x.strip()]
+
+DATA_FILE = "cuti_requests.json"   # data jadwal (mingguan)
 
 HARI_VALID = ["senin", "selasa", "rabu", "kamis", "jumat", "sabtu", "minggu"]
 
@@ -939,12 +932,653 @@ async def jadwal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await kirim_pdf(update, context)
 
 
+
+
+TARIF_OT = 25_000  # Rp per jam
+OT_DATA_FILE = "overtime_data.json"   # data overtime (bulanan)
+
+# ─────────────────────────────────────────────
+#  KARYAWAN (reuse BARISTA/CHEF dari bagian jadwal)
+# ─────────────────────────────────────────────
+SEMUA = BARISTA + CHEF
+
+TIM_LABEL = {n: "Barista" for n in BARISTA}
+TIM_LABEL.update({n: "Chef" for n in CHEF})
+
+
+# ─────────────────────────────────────────────
+#  HELPER: DATA STORAGE
+# ─────────────────────────────────────────────
+def ot_load_data() -> dict:
+    if os.path.exists(OT_DATA_FILE):
+        with open(OT_DATA_FILE) as f:
+            return json.load(f)
+    return {}
+
+def ot_save_data(data: dict):
+    with open(OT_DATA_FILE, "w") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
+def get_bulan_key():
+    return datetime.now().strftime("%Y-%m")
+
+def get_bulan_data() -> dict:
+    return ot_load_data().get(get_bulan_key(), {})
+
+def get_saldo(nama: str, all_data: dict = None) -> float:
+    """Hitung saldo OT karyawan dari akumulasi semua bulan yang masih tersimpan."""
+    if all_data is None:
+        all_data = ot_load_data()
+    total = 0.0
+    for bulan_data in all_data.values():
+        for tx in bulan_data.get(nama, {}).get("history", []):
+            total += tx["delta"]
+    return total
+
+def nama_valid(nama_raw: str):
+    return next((n for n in SEMUA if n.lower() == nama_raw.lower()), None)
+
+def fmt_jam(jam: float) -> str:
+    if jam == int(jam):
+        return f"{int(jam)} jam"
+    h = int(jam)
+    m = int(round((jam - h) * 60))
+    if h == 0:
+        return f"{m} menit"
+    return f"{h} jam {m} menit"
+
+def fmt_rp(n: float) -> str:
+    return f"Rp {int(n):,}".replace(",", ".")
+
+
+# ─────────────────────────────────────────────
+#  HELPER: TAMBAH TRANSAKSI
+# ─────────────────────────────────────────────
+def catat_transaksi(nama: str, delta: float, keterangan: str):
+    """
+    delta positif = tambah OT
+    delta negatif = kurangi OT (ambil pulang duluan / dibayar)
+    """
+    all_data  = ot_load_data()
+    bulan_key = get_bulan_key()
+    all_data.setdefault(bulan_key, {})
+    all_data[bulan_key].setdefault(nama, {"history": []})
+    all_data[bulan_key][nama]["history"].append({
+        "waktu":      datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "delta":      delta,
+        "keterangan": keterangan,
+    })
+    ot_save_data(all_data)
+
+
+# ─────────────────────────────────────────────
+#  GENERATE PDF REKAP OT
+# ─────────────────────────────────────────────
+def generate_pdf_ot(mode: str = "saldo", nama_filter: str = None) -> str:
+    """
+    mode:
+      - "saldo"  → rekap saldo semua karyawan (akhir bulan / kapanpun)
+      - "history" → detail history transaksi satu karyawan
+    """
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib import colors
+    from reportlab.lib.units import cm
+    from reportlab.platypus import (
+        SimpleDocTemplate, Table, TableStyle,
+        Paragraph, Spacer, HRFlowable
+    )
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+
+    # ── Palet (konsisten dengan bot jadwal) ──
+    BLACK      = colors.HexColor("#111111")
+    DARK_GRAY  = colors.HexColor("#2D2D2D")
+    MID_GRAY   = colors.HexColor("#757575")
+    LIGHT_GRAY = colors.HexColor("#F7F7F7")
+    WHITE      = colors.white
+    ACCENT_B   = colors.HexColor("#1A73E8")   # barista
+    ACCENT_C   = colors.HexColor("#E8711A")   # chef
+    GREEN      = colors.HexColor("#1B8A4E")   # saldo positif
+    RED        = colors.HexColor("#D32F2F")   # saldo nol
+    AMBER      = colors.HexColor("#E65100")   # highlight
+    BORDER     = colors.HexColor("#E0E0E0")
+    HEADER_BG  = colors.HexColor("#FAFAFA")
+    TODAY_BG   = colors.HexColor("#E8F0FE")
+
+    now    = datetime.now()
+    bulan  = now.strftime("%B %Y")
+    all_data = ot_load_data()
+
+    pdf_path = f"overtime_rekap_{now.strftime('%Y%m%d_%H%M')}.pdf"
+    doc = SimpleDocTemplate(
+        pdf_path, pagesize=A4,
+        topMargin=1.5*cm, bottomMargin=1.2*cm,
+        leftMargin=1.5*cm, rightMargin=1.5*cm
+    )
+
+    styles = getSampleStyleSheet()
+    def ps(name, **kw):
+        return ParagraphStyle(name, parent=styles["Normal"], **kw)
+
+    title_s  = ps("t",   alignment=1, fontName="Helvetica-Bold", fontSize=22, textColor=BLACK,    spaceAfter=3)
+    sub_s    = ps("s",   alignment=1, fontName="Helvetica",      fontSize=10, textColor=MID_GRAY, spaceAfter=2)
+    gen_s    = ps("g",   alignment=1, fontName="Helvetica",      fontSize=8,  textColor=MID_GRAY)
+    c_head   = ps("ch",  alignment=1, fontName="Helvetica-Bold", fontSize=9,  textColor=WHITE)
+    c_norm   = ps("cn",  alignment=1, fontName="Helvetica",      fontSize=9,  textColor=DARK_GRAY)
+    c_bold   = ps("cb",  alignment=1, fontName="Helvetica-Bold", fontSize=9,  textColor=DARK_GRAY)
+    c_green  = ps("cg",  alignment=1, fontName="Helvetica-Bold", fontSize=9,  textColor=GREEN)
+    c_red    = ps("cr",  alignment=1, fontName="Helvetica-Bold", fontSize=9,  textColor=RED)
+    c_amber  = ps("ca",  alignment=1, fontName="Helvetica-Bold", fontSize=9,  textColor=AMBER)
+    c_left   = ps("cl",  alignment=0, fontName="Helvetica",      fontSize=9,  textColor=DARK_GRAY)
+    c_leg    = ps("leg", alignment=1, fontName="Helvetica",      fontSize=7,  textColor=MID_GRAY)
+    c_sum    = ps("csum",alignment=1, fontName="Helvetica-Bold", fontSize=10, textColor=WHITE)
+
+    pw = A4[0] - 3*cm
+
+    def section_header(label, accent):
+        t = Table(
+            [[Paragraph(f"<b>{label}</b>",
+              ps("sh", fontName="Helvetica-Bold", fontSize=10, textColor=WHITE))]],
+            colWidths=[pw]
+        )
+        t.setStyle(TableStyle([
+            ("BACKGROUND",    (0,0), (-1,-1), accent),
+            ("LEFTPADDING",   (0,0), (-1,-1), 10),
+            ("TOPPADDING",    (0,0), (-1,-1), 6),
+            ("BOTTOMPADDING", (0,0), (-1,-1), 6),
+        ]))
+        return t
+
+    # ── MODE: SALDO SEMUA KARYAWAN ──
+    def build_saldo_table(anggota, accent):
+        header = [
+            Paragraph("NAMA",        c_head),
+            Paragraph("SALDO (JAM)", c_head),
+            Paragraph("NILAI",       c_head),
+            Paragraph("STATUS",      c_head),
+        ]
+        rows = [header]
+        total_jam = 0.0
+        total_rp  = 0.0
+
+        for nama in anggota:
+            saldo = get_saldo(nama, all_data)
+            rp    = saldo * TARIF_OT
+            total_jam += saldo
+            total_rp  += rp
+
+            if saldo > 0:
+                style_saldo  = c_green
+                style_rp     = c_green
+                status_para  = Paragraph("Ada saldo", c_green)
+            elif saldo < 0:
+                style_saldo  = c_red
+                style_rp     = c_red
+                status_para  = Paragraph("Minus ⚠", c_red)
+            else:
+                style_saldo  = c_norm
+                style_rp     = c_norm
+                status_para  = Paragraph("Lunas", c_norm)
+
+            rows.append([
+                Paragraph(f"<b>{nama}</b>", c_bold),
+                Paragraph(fmt_jam(saldo),   style_saldo),
+                Paragraph(fmt_rp(rp),       style_rp),
+                status_para,
+            ])
+
+        # Row total
+        rows.append([
+            Paragraph("<b>TOTAL</b>",        c_sum),
+            Paragraph(fmt_jam(total_jam),    c_sum),
+            Paragraph(fmt_rp(total_rp),      c_sum),
+            Paragraph(f"{len([n for n in anggota if get_saldo(n,all_data)>0])} orang ada saldo", c_sum),
+        ])
+
+        cw = [pw*0.28, pw*0.22, pw*0.25, pw*0.25]
+        t  = Table(rows, colWidths=cw, repeatRows=1)
+        n_data = len(rows)
+        cmds = [
+            ("BACKGROUND",    (0,0),     (-1,0),      accent),
+            ("BACKGROUND",    (0,n_data-1), (-1,n_data-1), colors.HexColor("#2D2D2D")),
+            ("ROWBACKGROUNDS",(1,1),     (-1,n_data-2), [WHITE, LIGHT_GRAY]),
+            ("LINEBELOW",     (0,0),     (-1,-1),     0.4, BORDER),
+            ("LINEAFTER",     (0,0),     (-1,-1),     0.4, BORDER),
+            ("BOX",           (0,0),     (-1,-1),     0.8, BORDER),
+            ("ALIGN",         (0,0),     (-1,-1),     "CENTER"),
+            ("VALIGN",        (0,0),     (-1,-1),     "MIDDLE"),
+            ("TOPPADDING",    (0,0),     (-1,-1),     7),
+            ("BOTTOMPADDING", (0,0),     (-1,-1),     7),
+        ]
+        t.setStyle(TableStyle(cmds))
+        return t, total_jam, total_rp
+
+    # ── MODE: HISTORY SATU KARYAWAN ──
+    def build_history_table(nama):
+        semua_tx = []
+        for bk, bd in sorted(all_data.items()):
+            for tx in bd.get(nama, {}).get("history", []):
+                semua_tx.append((bk, tx))
+
+        if not semua_tx:
+            return None, 0.0
+
+        header = [
+            Paragraph("TANGGAL",     c_head),
+            Paragraph("KETERANGAN",  c_head),
+            Paragraph("DELTA",       c_head),
+            Paragraph("SALDO",       c_head),
+        ]
+        rows   = [header]
+        saldo_run = 0.0
+
+        for _, tx in semua_tx:
+            saldo_run += tx["delta"]
+            delta = tx["delta"]
+            tgl   = tx["waktu"][:10]
+
+            delta_str = f"+{fmt_jam(delta)}" if delta > 0 else f"-{fmt_jam(abs(delta))}"
+            delta_style = c_green if delta > 0 else c_red
+
+            rows.append([
+                Paragraph(tgl, c_norm),
+                Paragraph(tx["keterangan"], c_left),
+                Paragraph(delta_str, delta_style),
+                Paragraph(fmt_jam(saldo_run), c_bold if saldo_run > 0 else c_norm),
+            ])
+
+        cw = [pw*0.18, pw*0.42, pw*0.20, pw*0.20]
+        t  = Table(rows, colWidths=cw, repeatRows=1)
+        n_data = len(rows)
+        cmds = [
+            ("BACKGROUND",    (0,0),  (-1,0),  ACCENT_B),
+            ("ROWBACKGROUNDS",(1,1),  (-1,-1), [WHITE, LIGHT_GRAY]),
+            ("LINEBELOW",     (0,0),  (-1,-1), 0.4, BORDER),
+            ("LINEAFTER",     (0,0),  (-1,-1), 0.4, BORDER),
+            ("BOX",           (0,0),  (-1,-1), 0.8, BORDER),
+            ("ALIGN",         (0,0),  (-1,-1), "CENTER"),
+            ("VALIGN",        (0,0),  (-1,-1), "MIDDLE"),
+            ("TOPPADDING",    (0,0),  (-1,-1), 7),
+            ("BOTTOMPADDING", (0,0),  (-1,-1), 7),
+        ]
+        t.setStyle(TableStyle(cmds))
+        return t, saldo_run
+
+    # ── BUILD STORY ──
+    story = []
+
+    if mode == "saldo":
+        story += [
+            Paragraph("Rekap Overtime Café Retri", title_s),
+            Paragraph(f"Per {now.strftime('%d %B %Y')}", sub_s),
+            Paragraph(f"Dibuat: {now.strftime('%d/%m/%Y %H:%M')}", gen_s),
+            Spacer(1, 0.4*cm),
+            HRFlowable(width="100%", thickness=1.5, color=ACCENT_B, spaceAfter=4),
+            Spacer(1, 0.2*cm),
+            section_header("☕  BARISTA", ACCENT_B),
+        ]
+        tbl_b, jam_b, rp_b = build_saldo_table(BARISTA, ACCENT_B)
+        story.append(tbl_b)
+        story += [Spacer(1, 0.35*cm), section_header("🍳  CHEF", ACCENT_C)]
+        tbl_c, jam_c, rp_c = build_saldo_table(CHEF, ACCENT_C)
+        story.append(tbl_c)
+
+        # Summary box
+        story += [Spacer(1, 0.5*cm)]
+        total_all_jam = jam_b + jam_c
+        total_all_rp  = rp_b + rp_c
+        sum_data = [[
+            Paragraph("TOTAL SEMUA KARYAWAN", ps("st", alignment=1, fontName="Helvetica-Bold", fontSize=10, textColor=WHITE)),
+            Paragraph(fmt_jam(total_all_jam), ps("sv", alignment=1, fontName="Helvetica-Bold", fontSize=10, textColor=WHITE)),
+            Paragraph(fmt_rp(total_all_rp),   ps("sr", alignment=1, fontName="Helvetica-Bold", fontSize=10, textColor=AMBER)),
+        ]]
+        sum_t = Table(sum_data, colWidths=[pw*0.5, pw*0.25, pw*0.25])
+        sum_t.setStyle(TableStyle([
+            ("BACKGROUND",    (0,0), (-1,-1), colors.HexColor("#111111")),
+            ("ALIGN",         (0,0), (-1,-1), "CENTER"),
+            ("VALIGN",        (0,0), (-1,-1), "MIDDLE"),
+            ("TOPPADDING",    (0,0), (-1,-1), 10),
+            ("BOTTOMPADDING", (0,0), (-1,-1), 10),
+            ("BOX",           (0,0), (-1,-1), 0.8, BORDER),
+        ]))
+        story.append(sum_t)
+
+        story += [
+            Spacer(1, 0.3*cm),
+            HRFlowable(width="100%", thickness=0.5, color=BORDER),
+            Spacer(1, 0.1*cm),
+            Paragraph(f"Tarif overtime: {fmt_rp(TARIF_OT)}/jam  ·  Saldo = akumulasi semua bulan belum dibayar", c_leg),
+        ]
+
+    elif mode == "history_all":
+        story += [
+            Paragraph("History Overtime — Semua Karyawan", title_s),
+            Paragraph(f"Per {now.strftime('%d %B %Y')}", sub_s),
+            Paragraph(f"Dibuat: {now.strftime('%d/%m/%Y %H:%M')}", gen_s),
+            Spacer(1, 0.4*cm),
+            HRFlowable(width="100%", thickness=1.5, color=ACCENT_B, spaceAfter=4),
+            Spacer(1, 0.2*cm),
+        ]
+
+        def tambah_section(nama, accent):
+            saldo_kini = get_saldo(nama, all_data)
+            story.append(section_header(f"{nama}  ({TIM_LABEL.get(nama,'')})  ·  Saldo: {fmt_jam(saldo_kini)} ({fmt_rp(saldo_kini * TARIF_OT)})", accent))
+            tbl, _ = build_history_table(nama)
+            if tbl:
+                story.append(tbl)
+            else:
+                story.append(Paragraph("Belum ada transaksi.", c_norm))
+            story.append(Spacer(1, 0.3*cm))
+
+        story.append(Paragraph("☕  BARISTA", ps("grp", fontName="Helvetica-Bold", fontSize=12, textColor=BLACK, spaceAfter=6)))
+        for n in BARISTA:
+            tambah_section(n, ACCENT_B)
+
+        story.append(Paragraph("🍳  CHEF", ps("grp2", fontName="Helvetica-Bold", fontSize=12, textColor=BLACK, spaceAfter=6)))
+        for n in CHEF:
+            tambah_section(n, ACCENT_C)
+
+        story += [
+            HRFlowable(width="100%", thickness=0.5, color=BORDER),
+            Spacer(1, 0.1*cm),
+            Paragraph(f"Tarif overtime: {fmt_rp(TARIF_OT)}/jam  ·  + = tambah OT  ·  - = ambil/bayar OT", c_leg),
+        ]
+
+    elif mode == "history" and nama_filter:
+        tim = TIM_LABEL.get(nama_filter, "")
+        accent = ACCENT_B if tim == "Barista" else ACCENT_C
+        saldo_kini = get_saldo(nama_filter, all_data)
+
+        story += [
+            Paragraph(f"History Overtime — {nama_filter}", title_s),
+            Paragraph(f"Tim {tim}  ·  Saldo sekarang: {fmt_jam(saldo_kini)}  ({fmt_rp(saldo_kini * TARIF_OT)})", sub_s),
+            Paragraph(f"Dibuat: {now.strftime('%d/%m/%Y %H:%M')}", gen_s),
+            Spacer(1, 0.4*cm),
+            HRFlowable(width="100%", thickness=1.5, color=accent, spaceAfter=4),
+            Spacer(1, 0.2*cm),
+            section_header(f"📋  RIWAYAT TRANSAKSI — {nama_filter.upper()}", accent),
+        ]
+        tbl, _ = build_history_table(nama_filter)
+        if tbl:
+            story.append(tbl)
+        else:
+            story.append(Paragraph("Belum ada transaksi.", c_norm))
+
+        story += [
+            Spacer(1, 0.3*cm),
+            HRFlowable(width="100%", thickness=0.5, color=BORDER),
+            Spacer(1, 0.1*cm),
+            Paragraph(f"Tarif overtime: {fmt_rp(TARIF_OT)}/jam  ·  + = tambah OT  ·  - = ambil/bayar OT", c_leg),
+        ]
+
+    doc.build(story)
+    return pdf_path
+
+
+# ─────────────────────────────────────────────
+#  HELPER: KIRIM PDF
+# ─────────────────────────────────────────────
+async def kirim_pdf_saldo(update, caption=""):
+    pdf = generate_pdf_ot(mode="saldo")
+    with open(pdf, "rb") as f:
+        await update.message.reply_document(
+            document=f,
+            filename=f"OT_Rekap_{datetime.now().strftime('%d%b%Y')}.pdf",
+            caption=caption or f"📊 Rekap Overtime Café Retri — {datetime.now().strftime('%d %B %Y')}"
+        )
+
+async def kirim_pdf_history(update):
+    pdf = generate_pdf_ot(mode="history_all")
+    with open(pdf, "rb") as f:
+        await update.message.reply_document(
+            document=f,
+            filename=f"OT_History_Semua_{datetime.now().strftime('%d%b%Y')}.pdf",
+            caption=f"📋 History Overtime Semua Karyawan — {datetime.now().strftime('%d %B %Y')}"
+        )
+
+
+# ─────────────────────────────────────────────
+#  COMMAND: /start
+# ─────────────────────────────────────────────
+async def start_overtime(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if is_admin(uid):
+        msg = (
+            "⏱ Bot Overtime Café Retri — ADMIN\n\n"
+            "📋 Perintah:\n\n"
+            "▸ /ot [nama] [jam]\n"
+            "  Tambah overtime\n"
+            "  Contoh: /ot krisna 1\n"
+            "  Contoh: /ot krisna 1.5  (1 jam 30 menit)\n\n"
+            "▸ /ambilot [nama] [jam] [keterangan]\n"
+            "  Kurangi OT (pulang duluan / dibayar cash)\n"
+            "  Contoh: /ambilot krisna 1 pulang duluan\n"
+            "  Contoh: /ambilot krisna 2 dibayar cash\n\n"
+            "▸ /saldo [nama]\n"
+            "  Cek saldo OT satu karyawan\n"
+            "  Contoh: /saldo krisna\n\n"
+            "▸ /semuasaldo\n"
+            "  Lihat saldo semua karyawan (teks)\n\n"
+            "▸ /rekap\n"
+            "  Generate PDF rekap saldo semua karyawan\n\n"
+            "▸ /history\n"
+            "  Generate PDF history transaksi SEMUA karyawan sekaligus\n\n"
+            "▸ /tutupbulan\n"
+            "  Bayar semua saldo OT → saldo jadi 0 & generate PDF rekap final\n\n"
+            f"👥 Karyawan: {', '.join(SEMUA)}"
+        )
+    else:
+        msg = "⏱ Bot Overtime Café Retri\nHubungi admin untuk informasi overtime kamu."
+    await update.message.reply_text(msg)
+
+
+# ─────────────────────────────────────────────
+#  COMMAND: /ot — tambah overtime
+# ─────────────────────────────────────────────
+async def tambah_ot(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ Hanya admin.")
+        return
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            "Format: /ot [nama] [jam]\n"
+            "Contoh: /ot krisna 1\n"
+            "        /ot krisna 1.5"
+        )
+        return
+
+    nama = nama_valid(context.args[0])
+    if not nama:
+        await update.message.reply_text(
+            f"❌ Nama tidak dikenal.\nPilihan: {', '.join(SEMUA)}"
+        )
+        return
+
+    try:
+        jam = float(context.args[1])
+        assert jam > 0
+    except:
+        await update.message.reply_text("❌ Jam harus angka positif. Contoh: 1 atau 1.5")
+        return
+
+    ket = " ".join(context.args[2:]) if len(context.args) > 2 else "Overtime"
+    catat_transaksi(nama, jam, ket)
+    saldo_baru = get_saldo(nama)
+
+    await update.message.reply_text(
+        f"✅ OT {nama} +{fmt_jam(jam)}\n"
+        f"📊 Saldo sekarang: {fmt_jam(saldo_baru)} ({fmt_rp(saldo_baru * TARIF_OT)})"
+    )
+
+
+# ─────────────────────────────────────────────
+#  COMMAND: /ambilot — kurangi overtime
+# ─────────────────────────────────────────────
+async def ambil_ot(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ Hanya admin.")
+        return
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            "Format: /ambilot [nama] [jam] [keterangan opsional]\n"
+            "Contoh: /ambilot krisna 1 pulang duluan\n"
+            "        /ambilot krisna 2 dibayar cash"
+        )
+        return
+
+    nama = nama_valid(context.args[0])
+    if not nama:
+        await update.message.reply_text(
+            f"❌ Nama tidak dikenal.\nPilihan: {', '.join(SEMUA)}"
+        )
+        return
+
+    try:
+        jam = float(context.args[1])
+        assert jam > 0
+    except:
+        await update.message.reply_text("❌ Jam harus angka positif.")
+        return
+
+    saldo = get_saldo(nama)
+    if jam > saldo:
+        await update.message.reply_text(
+            f"❌ Saldo {nama} hanya {fmt_jam(saldo)}. Tidak bisa ambil {fmt_jam(jam)}."
+        )
+        return
+
+    ket = " ".join(context.args[2:]) if len(context.args) > 2 else "Ambil OT"
+    catat_transaksi(nama, -jam, ket)
+    saldo_baru = get_saldo(nama)
+
+    await update.message.reply_text(
+        f"✅ OT {nama} -{fmt_jam(jam)} ({ket})\n"
+        f"📊 Saldo sekarang: {fmt_jam(saldo_baru)} ({fmt_rp(saldo_baru * TARIF_OT)})"
+    )
+
+
+# ─────────────────────────────────────────────
+#  COMMAND: /saldo — cek saldo satu orang
+# ─────────────────────────────────────────────
+async def saldo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ Hanya admin.")
+        return
+    if not context.args:
+        await update.message.reply_text("Format: /saldo [nama]\nContoh: /saldo krisna")
+        return
+
+    nama = nama_valid(context.args[0])
+    if not nama:
+        await update.message.reply_text(f"❌ Nama tidak dikenal.\nPilihan: {', '.join(SEMUA)}")
+        return
+
+    s = get_saldo(nama)
+    tim = TIM_LABEL.get(nama, "")
+    await update.message.reply_text(
+        f"📊 Saldo OT {nama} ({tim})\n"
+        f"⏱ {fmt_jam(s)}\n"
+        f"💵 {fmt_rp(s * TARIF_OT)}"
+    )
+
+
+# ─────────────────────────────────────────────
+#  COMMAND: /semuasaldo — lihat semua saldo (teks)
+# ─────────────────────────────────────────────
+async def semua_saldo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ Hanya admin.")
+        return
+
+    all_data = ot_load_data()
+    lines = [f"📊 Saldo OT — {datetime.now().strftime('%d %B %Y')}\n"]
+
+    lines.append("☕ BARISTA:")
+    total_b = 0.0
+    for n in BARISTA:
+        s = get_saldo(n, all_data)
+        total_b += s
+        icon = "✅" if s > 0 else "—"
+        lines.append(f"  {icon} {n}: {fmt_jam(s)} ({fmt_rp(s * TARIF_OT)})")
+
+    lines.append(f"\n🍳 CHEF:")
+    total_c = 0.0
+    for n in CHEF:
+        s = get_saldo(n, all_data)
+        total_c += s
+        icon = "✅" if s > 0 else "—"
+        lines.append(f"  {icon} {n}: {fmt_jam(s)} ({fmt_rp(s * TARIF_OT)})")
+
+    total = total_b + total_c
+    lines.append(f"\n💵 Total wajib bayar: {fmt_rp(total * TARIF_OT)}")
+
+    await update.message.reply_text("\n".join(lines))
+
+
+# ─────────────────────────────────────────────
+#  COMMAND: /rekap — generate PDF saldo semua
+# ─────────────────────────────────────────────
+async def rekap(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ Hanya admin.")
+        return
+    await update.message.reply_text("⏳ Generating PDF rekap...")
+    await kirim_pdf_saldo(update)
+
+
+# ─────────────────────────────────────────────
+#  COMMAND: /history — PDF history satu karyawan
+# ─────────────────────────────────────────────
+async def history(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ Hanya admin.")
+        return
+
+    await update.message.reply_text("⏳ Generating PDF history semua karyawan...")
+    await kirim_pdf_history(update)
+
+
+# ─────────────────────────────────────────────
+#  COMMAND: /tutupbulan — bayar semua OT → saldo 0
+# ─────────────────────────────────────────────
+async def tutup_bulan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ Hanya admin.")
+        return
+
+    all_data = ot_load_data()
+    ada_saldo = [(n, get_saldo(n, all_data)) for n in SEMUA if get_saldo(n, all_data) > 0]
+
+    if not ada_saldo:
+        await update.message.reply_text("ℹ️ Semua saldo sudah 0. Tidak ada yang perlu dibayar.")
+        return
+
+    await update.message.reply_text("⏳ Generating PDF final & menutup bulan...")
+    # Generate PDF dulu sebelum di-reset
+    await kirim_pdf_saldo(update, caption=f"📊 REKAP FINAL — {datetime.now().strftime('%B %Y')} (sebelum tutup buku)")
+
+    # Reset semua saldo: catat transaksi -saldo untuk yang punya saldo
+    lines = [f"✅ Tutup bulan {datetime.now().strftime('%B %Y')}:\n"]
+    for nama, s in ada_saldo:
+        ket = f"Bayar cash tutup bulan {datetime.now().strftime('%B %Y')}"
+        catat_transaksi(nama, -s, ket)
+        lines.append(f"  • {nama}: dibayar {fmt_rp(s * TARIF_OT)}")
+
+    total = sum(s for _, s in ada_saldo)
+    lines.append(f"\n💵 Total dibayar: {fmt_rp(total * TARIF_OT)}")
+    lines.append("📌 Saldo semua karyawan kini = 0")
+
+    await update.message.reply_text("\n".join(lines))
+
+
+
+
 # ─────────────────────────────────────────────
 #  MAIN
 # ─────────────────────────────────────────────
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
+    # ── Command jadwal ──
     app.add_handler(CommandHandler("start",         start))
     app.add_handler(CommandHandler("cuti",          cuti))
     app.add_handler(CommandHandler("batalcuti",     batalcuti))
@@ -954,7 +1588,17 @@ def main():
     app.add_handler(CommandHandler("daftarcuti",    daftarcuti))
     app.add_handler(CommandHandler("jadwal",        jadwal_cmd))
 
-    logger.info("Bot Jadwal Café Retri berjalan...")
+    # ── Command overtime ──
+    app.add_handler(CommandHandler("startovertime", start_overtime))
+    app.add_handler(CommandHandler("ot",            tambah_ot))
+    app.add_handler(CommandHandler("ambilot",       ambil_ot))
+    app.add_handler(CommandHandler("saldo",         saldo))
+    app.add_handler(CommandHandler("semuasaldo",    semua_saldo))
+    app.add_handler(CommandHandler("rekap",         rekap))
+    app.add_handler(CommandHandler("history",       history))
+    app.add_handler(CommandHandler("tutupbulan",    tutup_bulan))
+
+    logger.info("Bot Café Retri (Jadwal + Overtime) berjalan...")
     app.run_polling()
 
 
