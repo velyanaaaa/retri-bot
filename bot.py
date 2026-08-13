@@ -9,7 +9,9 @@ Gabungan bot jadwal shift & bot overtime karyawan.
 import os, json, logging
 from datetime import datetime, timedelta
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
+
+from absensi_import import parse_absensi_txt, generate_pdf_absensi, rekap_ringkas
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -1337,6 +1339,48 @@ async def kirim_pdf_history(update):
 
 
 # ─────────────────────────────────────────────
+#  HANDLER: FILE ABSENSI MASUK (.TXT)
+# ─────────────────────────────────────────────
+async def terima_file_absensi(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Dipicu saat admin kirim file .TXT (raw scan log absensi) ke bot.
+    Otomatis: download → parse → generate PDF → kirim balik ke chat yang sama.
+    """
+    if not is_admin(update.effective_user.id):
+        return  # diam saja kalau bukan admin, biar ga ganggu chat lain
+
+    doc = update.message.document
+    if not doc or not doc.file_name.lower().endswith(".txt"):
+        return  # bukan file txt, abaikan (biar ga bentrok sama file lain)
+
+    status_msg = await update.message.reply_text("⏳ File absensi diterima, memproses...")
+
+    try:
+        tg_file    = await doc.get_file()
+        file_bytes = bytes(await tg_file.download_as_bytearray())
+
+        records = parse_absensi_txt(file_bytes)
+        if not records:
+            await status_msg.edit_text("❌ Tidak ada data yang bisa dibaca dari file ini. Cek format file-nya.")
+            return
+
+        pdf_path = generate_pdf_absensi(records)
+        ringkasan = rekap_ringkas(records)
+
+        with open(pdf_path, "rb") as f:
+            await update.message.reply_document(
+                document=f,
+                filename=f"Laporan_Absensi_{datetime.now().strftime('%d%b%Y')}.pdf",
+                caption=f"📄 Laporan absensi otomatis dari {doc.file_name}\n\n{ringkasan}"
+            )
+        await status_msg.delete()
+
+    except Exception as e:
+        logger.exception("Gagal proses file absensi")
+        await status_msg.edit_text(f"❌ Gagal memproses file: {e}")
+
+
+# ─────────────────────────────────────────────
 #  COMMAND: /start
 # ─────────────────────────────────────────────
 async def start_overtime(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1364,6 +1408,8 @@ async def start_overtime(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "  Generate PDF history transaksi SEMUA karyawan sekaligus\n\n"
             "▸ /tutupbulan\n"
             "  Bayar semua saldo OT → saldo jadi 0 & generate PDF rekap final\n\n"
+            "▸ Kirim file .TXT (scan log absensi)\n"
+            "  Bot otomatis parse & kirim balik PDF laporan absensi\n\n"
             f"👥 Karyawan: {', '.join(SEMUA)}"
         )
     else:
@@ -1597,6 +1643,9 @@ def main():
     app.add_handler(CommandHandler("rekap",         rekap))
     app.add_handler(CommandHandler("history",       history))
     app.add_handler(CommandHandler("tutupbulan",    tutup_bulan))
+
+    # ── Handler file absensi (.txt) ──
+    app.add_handler(MessageHandler(filters.Document.ALL, terima_file_absensi))
 
     logger.info("Bot Café Retri (Jadwal + Overtime) berjalan...")
     app.run_polling()
