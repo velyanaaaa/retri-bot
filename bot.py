@@ -168,19 +168,50 @@ def siapa_tidak_masuk(hari, week_data, tim="barista"):
 
 def hitung_jadwal_barista_seminggu(week_data):
     """
-    Jadwal Barista fix per hari (dari JADWAL_BARISTA), bukan dihitung dinamis.
-    Kalau ada yang cuti/libur (via siapa_tidak_masuk: libur tetap, pindah libur,
-    atau cuti disetujui) → orang itu ditandai LIBUR, jam orang lain TIDAK berubah.
+    - Hari normal (cuma libur tetap terjadwal, sesuai LIBUR_TETAP_BARISTA) →
+      pakai jadwal fix dari JADWAL_BARISTA (sesuai papan tulis).
+    - Kalau ada tambahan yang TIDAK masuk di luar libur tetap normal (cuti
+      mendadak / pindah libur tambahan) → shift dihitung ulang dinamis:
+        * sisa 3 orang masuk → 06:30, 08:30, 09:30 (masing-masing 1 orang)
+        * sisa 2 orang masuk → 06:30 & 09:30 (08:30 di-skip)
+      Rotasi fairness: yang paling jarang dapat jam tertentu diprioritaskan.
+    - Yang tidak masuk ditandai LIBUR.
     """
     hasil = {hari: {} for hari in HARI_VALID}
+    dapat = {nama: {"06:30": 0, "08:30": 0, "09:30": 0} for nama in BARISTA}
 
     for hari in HARI_VALID:
-        tidak_masuk = siapa_tidak_masuk(hari, week_data, tim="barista")
+        tidak_masuk       = siapa_tidak_masuk(hari, week_data, tim="barista")
+        masuk              = [n for n in BARISTA if n not in tidak_masuk]
+        libur_tetap_hari   = LIBUR_TETAP_BARISTA.get(hari)
+        # "Ekstra" tidak masuk = tidak_masuk di luar libur tetap terjadwal hari ini
+        tidak_masuk_ekstra = [n for n in tidak_masuk if n != libur_tetap_hari]
 
-        for nama in BARISTA:
-            if nama in tidak_masuk:
-                hasil[hari][nama] = "LIBUR"
+        for nama in tidak_masuk:
+            hasil[hari][nama] = "LIBUR"
+
+        if not tidak_masuk_ekstra:
+            # Hari normal (paling banyak 1 orang libur tetap): pakai jadwal fix
+            for nama in masuk:
+                hasil[hari][nama] = JADWAL_BARISTA[hari][nama]
+        else:
+            # Ada tambahan yang gak masuk: hitung ulang shift dinamis
+            if len(masuk) == 3:
+                shift_tersedia = ["06:30", "08:30", "09:30"]
             else:
+                shift_tersedia = ["06:30", "09:30"]
+
+            sisa_masuk = list(masuk)
+            for jam in shift_tersedia:
+                if not sisa_masuk:
+                    break
+                kandidat = sorted(sisa_masuk, key=lambda n: dapat[n][jam])
+                terpilih = kandidat[0]
+                hasil[hari][terpilih] = jam
+                dapat[terpilih][jam] += 1
+                sisa_masuk.remove(terpilih)
+            # Kalau masih ada sisa (4 orang tetap masuk, edge case), isi pakai jadwal fix
+            for nama in sisa_masuk:
                 hasil[hari][nama] = JADWAL_BARISTA[hari][nama]
 
     return hasil
@@ -209,18 +240,45 @@ def buat_jadwal_barista(hari, week_data, jadwal_seminggu=None):
 
 def hitung_jadwal_chef_seminggu(week_data):
     """
-    Jadwal Chef fix per hari (dari JADWAL_CHEF), bukan dihitung dinamis.
-    Kalau ada yang cuti/libur → orang itu ditandai LIBUR, jam yang lain tidak berubah.
+    - Hari normal (cuma libur tetap terjadwal, sesuai LIBUR_TETAP_CHEF) → pakai
+      jadwal fix dari JADWAL_CHEF, karena tabel itu sudah dibuat dengan asumsi
+      1 orang libur tetap per hari.
+    - Kalau ada tambahan yang TIDAK masuk di luar libur tetap normal (cuti
+      mendadak / pindah libur tambahan, sehingga cuma 2 orang masuk) → dua
+      slot penting WAJIB terisi: 06:30 & 09:30 (slot 08:00 di-skip). Siapa
+      dapat 06:30 vs 09:30 digilir tiap minggu (fairness/rotasi) biar rata.
+    - Yang tidak masuk ditandai LIBUR.
     """
     hasil = {hari: {} for hari in HARI_VALID}
+    dapat = {nama: {"06:30": 0, "09:30": 0} for nama in CHEF}
 
     for hari in HARI_VALID:
-        tidak_masuk = siapa_tidak_masuk(hari, week_data, tim="chef")
+        tidak_masuk       = siapa_tidak_masuk(hari, week_data, tim="chef")
+        masuk              = [n for n in CHEF if n not in tidak_masuk]
+        libur_tetap_hari   = LIBUR_TETAP_CHEF.get(hari)
+        # "Ekstra" tidak masuk = tidak_masuk di luar libur tetap terjadwal hari ini
+        tidak_masuk_ekstra = [n for n in tidak_masuk if n != libur_tetap_hari]
 
-        for nama in CHEF:
-            if nama in tidak_masuk:
-                hasil[hari][nama] = "LIBUR"
-            else:
+        for nama in tidak_masuk:
+            hasil[hari][nama] = "LIBUR"
+
+        if not tidak_masuk_ekstra:
+            # Hari normal (paling banyak 1 orang libur tetap): pakai jadwal fix
+            for nama in masuk:
+                hasil[hari][nama] = JADWAL_CHEF[hari][nama]
+        else:
+            # Ada tambahan yang gak masuk: cover 06:30 & 09:30 via rotasi fairness
+            sisa_masuk = list(masuk)
+            for jam in ["06:30", "09:30"]:
+                if not sisa_masuk:
+                    break
+                kandidat = sorted(sisa_masuk, key=lambda n: dapat[n][jam])
+                terpilih = kandidat[0]
+                hasil[hari][terpilih] = jam
+                dapat[terpilih][jam] += 1
+                sisa_masuk.remove(terpilih)
+            # Kalau masih ada sisa (3 orang tetap masuk, edge case), isi pakai jadwal fix
+            for nama in sisa_masuk:
                 hasil[hari][nama] = JADWAL_CHEF[hari][nama]
 
     return hasil
