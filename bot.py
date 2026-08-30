@@ -594,7 +594,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "▸ /daftarcuti\n"
             "  Lihat semua request cuti & perubahan libur minggu ini\n\n"
             "▸ /jadwal\n"
-            "  Generate & kirim PDF jadwal minggu ini"
+            "  Generate & kirim PDF jadwal minggu ini\n\n"
+            "⏱ /startovertime\n"
+            "  Lihat daftar perintah untuk fitur Overtime"
         )
     else:
         msg = (
