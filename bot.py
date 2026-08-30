@@ -69,13 +69,13 @@ LIBUR_TETAP_CHEF = {
 
 # Jadwal shift chef per hari (fixed)
 JADWAL_CHEF = {
-    "senin":  {"Adi": "06:30", "Ucil": "LIBUR", "Dito": "08:00"},
+    "senin":  {"Adi": "09:30", "Ucil": "LIBUR", "Dito": "06:30"},
     "selasa": {"Adi": "06:30", "Ucil": "09:30", "Dito": "08:00"},
     "rabu":   {"Adi": "LIBUR", "Ucil": "09:30", "Dito": "06:30"},
     "kamis":  {"Adi": "09:30", "Ucil": "06:30", "Dito": "LIBUR"},
     "jumat":  {"Adi": "08:00", "Ucil": "06:30", "Dito": "09:30"},
     "sabtu":  {"Adi": "09:30", "Ucil": "08:00", "Dito": "06:30"},
-    "minggu": {"Adi": "06:30", "Ucil": "09:30", "Dito": "08:00"},
+    "minggu": {"Adi": "08:00", "Ucil": "06:30", "Dito": "09:30"},
 }
 
 # Gabungan semua karyawan untuk validasi nama
@@ -209,38 +209,19 @@ def buat_jadwal_barista(hari, week_data, jadwal_seminggu=None):
 
 def hitung_jadwal_chef_seminggu(week_data):
     """
-    Hitung jadwal Chef untuk seminggu penuh dengan distribusi shift yang adil.
-    - 3 chef masuk → shift tersedia: 06:30, 08:00, 09:30
-    - 2 chef masuk (1 libur/cuti) → shift tersedia: 06:30, 09:30 (tanpa 08:00)
-    Rotasi fairness: yang paling sedikit dapat jam tertentu diprioritaskan.
+    Jadwal Chef fix per hari (dari JADWAL_CHEF), bukan dihitung dinamis.
+    Kalau ada yang cuti/libur → orang itu ditandai LIBUR, jam yang lain tidak berubah.
     """
-    hasil  = {hari: {} for hari in HARI_VALID}
-    dapat  = {nama: {"06:30": 0, "08:00": 0, "09:30": 0} for nama in CHEF}
+    hasil = {hari: {} for hari in HARI_VALID}
 
     for hari in HARI_VALID:
         tidak_masuk = siapa_tidak_masuk(hari, week_data, tim="chef")
-        masuk       = [n for n in CHEF if n not in tidak_masuk]
 
-        # Tandai yang tidak masuk
-        for nama in tidak_masuk:
-            hasil[hari][nama] = "LIBUR"
-
-        # Tentukan shift tersedia berdasarkan jumlah yang masuk
-        if len(masuk) == 3:
-            shift_tersedia = ["06:30", "08:00", "09:30"]
-        else:
-            shift_tersedia = ["06:30", "09:30"]
-
-        # Assign shift: prioritaskan yang paling jarang dapat shift itu
-        sisa_masuk = list(masuk)
-        for jam in shift_tersedia:
-            if not sisa_masuk:
-                break
-            kandidat = sorted(sisa_masuk, key=lambda n: dapat[n][jam])
-            terpilih = kandidat[0]
-            hasil[hari][terpilih] = jam
-            dapat[terpilih][jam] += 1
-            sisa_masuk.remove(terpilih)
+        for nama in CHEF:
+            if nama in tidak_masuk:
+                hasil[hari][nama] = "LIBUR"
+            else:
+                hasil[hari][nama] = JADWAL_CHEF[hari][nama]
 
     return hasil
 
