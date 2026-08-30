@@ -39,9 +39,17 @@ LIBUR_TETAP_BARISTA = {
     "minggu": "Krisna",
 }
 
-# Pasangan tetap barista untuk hari normal (semua 4 masuk → 2 shift, pasangan masing-masing)
-# Pasangan ini dipakai saat 4 orang masuk: setiap pasangan dapat 1 shift (06:30 atau 09:30)
-PASANGAN_BARISTA = [["Krisna", "Dian"], ["Ayuk", "Yuyu"]]
+# Jadwal shift barista per hari (fixed, sesuai papan tulis)
+# Kalau orangnya libur/cuti hari itu, entrinya di-skip (bukan dibaca dari sini)
+JADWAL_BARISTA = {
+    "senin":  {"Krisna": "09:30", "Dian": "08:30", "Ayuk": "06:30", "Yuyu": "LIBUR"},
+    "selasa": {"Krisna": "09:30", "Dian": "06:30", "Ayuk": "LIBUR", "Yuyu": "08:30"},
+    "rabu":   {"Krisna": "06:30", "Dian": "LIBUR", "Ayuk": "09:30", "Yuyu": "08:30"},
+    "kamis":  {"Krisna": "06:30", "Dian": "09:30", "Ayuk": "09:30", "Yuyu": "06:30"},
+    "jumat":  {"Krisna": "09:30", "Dian": "06:30", "Ayuk": "06:30", "Yuyu": "09:30"},
+    "sabtu":  {"Krisna": "06:30", "Dian": "09:30", "Ayuk": "06:30", "Yuyu": "09:30"},
+    "minggu": {"Krisna": "LIBUR", "Dian": "06:30", "Ayuk": "09:30", "Yuyu": "08:30"},
+}
 
 # ─────────────────────────────────────────────
 #  TIM CHEF
@@ -160,79 +168,20 @@ def siapa_tidak_masuk(hari, week_data, tim="barista"):
 
 def hitung_jadwal_barista_seminggu(week_data):
     """
-    Hitung jadwal Barista untuk seminggu penuh secara dinamis.
-
-    Aturan shift:
-    - 4 orang masuk → 2 shift: 06:30 & 09:30 (pasangan tetap PASANGAN_BARISTA)
-    - 3 orang masuk (ada 1 libur/cuti) → 3 shift: 06:30, 08:30, 09:30
-      Rotasi fairness: yang paling jarang dapat jam tertentu diprioritaskan.
-    - Kalau libur tetap dibatalkan admin → karyawan itu masuk, jumlah masuk bisa jadi 4/5
-      (tetap fallback ke logika 4 orang = 2 shift)
+    Jadwal Barista fix per hari (dari JADWAL_BARISTA), bukan dihitung dinamis.
+    Kalau ada yang cuti/libur (via siapa_tidak_masuk: libur tetap, pindah libur,
+    atau cuti disetujui) → orang itu ditandai LIBUR, jam orang lain TIDAK berubah.
     """
     hasil = {hari: {} for hari in HARI_VALID}
-    dapat = {nama: {"06:30": 0, "08:30": 0, "09:30": 0} for nama in BARISTA}
-
-    # Rotasi pasangan untuk hari normal (4 orang masuk)
-    # Setiap minggu pasangan bergantian: pasangan 1 dapat 06:30 atau 09:30
-    rotasi_pasangan = 0  # track berapa kali rotasi sudah terjadi
 
     for hari in HARI_VALID:
         tidak_masuk = siapa_tidak_masuk(hari, week_data, tim="barista")
-        masuk       = [n for n in BARISTA if n not in tidak_masuk]
 
-        # Tandai yang tidak masuk
-        for nama in tidak_masuk:
-            hasil[hari][nama] = "LIBUR"
-
-        if len(masuk) == 4:
-            # ── 4 orang masuk → 2 shift (06:30 & 09:30), pakai pasangan tetap ──
-            # Pasangan 0 dapat jam berdasarkan rotasi, pasangan 1 dapat kebalikannya
-            jam_pasangan = [
-                ["06:30", "09:30"],
-                ["09:30", "06:30"],
-            ]
-            shift_pair = jam_pasangan[rotasi_pasangan % 2]
-            rotasi_pasangan += 1
-
-            for idx, pasangan in enumerate(PASANGAN_BARISTA):
-                jam = shift_pair[idx]
-                for nama in pasangan:
-                    if nama in masuk:
-                        hasil[hari][nama] = jam
-                        dapat[nama][jam] += 1
-
-        elif len(masuk) == 3:
-            # ── 3 orang masuk → 3 shift: 06:30, 08:30, 09:30 ──
-            shift_tersedia = ["06:30", "08:30", "09:30"]
-            sisa_masuk     = list(masuk)
-
-            for jam in shift_tersedia:
-                if not sisa_masuk:
-                    break
-                # Prioritaskan yang paling jarang dapat jam ini
-                kandidat = sorted(sisa_masuk, key=lambda n: dapat[n][jam])
-                terpilih = kandidat[0]
-                hasil[hari][terpilih] = jam
-                dapat[terpilih][jam] += 1
-                sisa_masuk.remove(terpilih)
-
-        elif len(masuk) == 2:
-            # ── 2 orang masuk (edge case) → 06:30 & 09:30 ──
-            shift_tersedia = ["06:30", "09:30"]
-            sisa_masuk     = list(masuk)
-            for jam in shift_tersedia:
-                if not sisa_masuk:
-                    break
-                kandidat = sorted(sisa_masuk, key=lambda n: dapat[n][jam])
-                terpilih = kandidat[0]
-                hasil[hari][terpilih] = jam
-                dapat[terpilih][jam] += 1
-                sisa_masuk.remove(terpilih)
-
-        else:
-            # Sisanya (1 atau 0 orang masuk — sangat jarang)
-            for nama in masuk:
-                hasil[hari][nama] = "06:30"
+        for nama in BARISTA:
+            if nama in tidak_masuk:
+                hasil[hari][nama] = "LIBUR"
+            else:
+                hasil[hari][nama] = JADWAL_BARISTA[hari][nama]
 
     return hasil
 
@@ -249,23 +198,13 @@ def buat_jadwal_barista(hari, week_data, jadwal_seminggu=None):
             if jadwal_seminggu[hari].get(nama, "LIBUR") != "LIBUR"
         ]
 
-    # Fallback: hitung on-the-fly untuk hari ini saja
+    # Fallback manual (tidak dipakai normalnya)
     tidak_masuk = siapa_tidak_masuk(hari, week_data, tim="barista")
-    masuk       = [n for n in BARISTA if n not in tidak_masuk]
-    result      = []
-
-    if len(masuk) == 4:
-        shift_tersedia = ["06:30", "06:30", "09:30", "09:30"]
-    elif len(masuk) == 3:
-        shift_tersedia = ["06:30", "08:30", "09:30"]
-    else:
-        shift_tersedia = ["06:30", "09:30"]
-
-    for i, nama in enumerate(masuk):
-        jam = shift_tersedia[i] if i < len(shift_tersedia) else "09:30"
-        result.append({"nama": nama, "jam": jam})
-
-    return result
+    return [
+        {"nama": nama, "jam": JADWAL_BARISTA[hari][nama]}
+        for nama in BARISTA
+        if nama not in tidak_masuk
+    ]
 
 
 def hitung_jadwal_chef_seminggu(week_data):
