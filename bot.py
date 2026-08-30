@@ -32,10 +32,10 @@ BARISTA = ["Dian", "Yuyu", "Krisna", "Ayuk"]
 LIBUR_TETAP_BARISTA = {
     "senin":  "Yuyu",
     "selasa": "Ayuk",
-    "rabu":   None,
+    "rabu":   "Dian",
     "kamis":  None,
     "jumat":  None,
-    "sabtu":  "Dian",
+    "sabtu":  None,
     "minggu": "Krisna",
 }
 
