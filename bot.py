@@ -19,7 +19,9 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_IDS = [int(x) for x in os.environ.get("ADMIN_IDS", "").split(",") if x.strip()]
 
-DATA_FILE = "cuti_requests.json"   # data jadwal (mingguan)
+DATA_FILE      = "cuti_requests.json"   # data jadwal (mingguan)
+JATAH_CUTI_FILE = "jatah_cuti.json"     # data sisa jatah cuti tahunan per karyawan
+JATAH_CUTI_DEFAULT = 12                 # jatah cuti per tahun (sama rata semua karyawan)
 
 HARI_VALID = ["senin", "selasa", "rabu", "kamis", "jumat", "sabtu", "minggu"]
 
@@ -103,6 +105,43 @@ def save_data(data):
     """Simpan data ke file JSON."""
     with open(DATA_FILE, "w") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
+
+
+# ─────────────────────────────────────────────
+#  HELPER: JATAH CUTI TAHUNAN
+# ─────────────────────────────────────────────
+def load_jatah_cuti():
+    """
+    Load sisa jatah cuti tahunan per karyawan.
+    Format: {"Nama": sisa_jatah, ...}
+    Kalau file belum ada / karyawan belum tercatat → pakai JATAH_CUTI_DEFAULT.
+    """
+    data = {}
+    if os.path.exists(JATAH_CUTI_FILE):
+        with open(JATAH_CUTI_FILE) as f:
+            data = json.load(f)
+    for nama in SEMUA_KARYAWAN:
+        if nama not in data:
+            data[nama] = JATAH_CUTI_DEFAULT
+    return data
+
+def save_jatah_cuti(data):
+    with open(JATAH_CUTI_FILE, "w") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
+def kurangi_jatah_cuti(nama):
+    """Kurangi jatah cuti nama sebanyak 1. Return sisa jatah setelah dikurangi."""
+    data = load_jatah_cuti()
+    data[nama] = data.get(nama, JATAH_CUTI_DEFAULT) - 1
+    save_jatah_cuti(data)
+    return data[nama]
+
+def kembalikan_jatah_cuti(nama):
+    """Kembalikan jatah cuti nama sebanyak 1 (batal cuti). Return sisa jatah setelah dikembalikan."""
+    data = load_jatah_cuti()
+    data[nama] = data.get(nama, JATAH_CUTI_DEFAULT) + 1
+    save_jatah_cuti(data)
+    return data[nama]
 
 
 # ─────────────────────────────────────────────
@@ -628,6 +667,16 @@ async def cuti(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # Cek sisa jatah cuti tahunan
+    jatah = load_jatah_cuti()
+    sisa_jatah = jatah.get(nama, JATAH_CUTI_DEFAULT)
+    if sisa_jatah <= 0:
+        await update.message.reply_text(
+            f"❌ Jatah cuti {nama} sudah habis (0 tersisa dari {JATAH_CUTI_DEFAULT}/tahun).\n"
+            f"Gunakan /setjatah {nama.lower()} [jumlah] kalau mau menambah manual."
+        )
+        return
+
     # Simpan request cuti
     week_data.setdefault("cuti", {}).setdefault(nama, [])
     if hari in week_data["cuti"][nama]:
@@ -639,9 +688,11 @@ async def cuti(update: Update, context: ContextTypes.DEFAULT_TYPE):
     week_data["cuti"][nama].append(hari)
     all_data[week_key] = week_data
     save_data(all_data)
+    sisa_setelah = kurangi_jatah_cuti(nama)
 
     await update.message.reply_text(
         f"✅ Cuti {hari.capitalize()} untuk {nama} berhasil dicatat!\n"
+        f"📋 Sisa jatah cuti {nama}: {sisa_setelah}/{JATAH_CUTI_DEFAULT} tahun ini.\n"
         f"Generating jadwal..."
     )
     await kirim_pdf(update, context)
@@ -683,12 +734,98 @@ async def batalcuti(update: Update, context: ContextTypes.DEFAULT_TYPE):
         del week_data["cuti"][nama]
     all_data[week_key] = week_data
     save_data(all_data)
+    sisa_setelah = kembalikan_jatah_cuti(nama)
 
     await update.message.reply_text(
         f"✅ Request cuti {hari.capitalize()} untuk {nama} dibatalkan.\n"
+        f"📋 Sisa jatah cuti {nama}: {sisa_setelah}/{JATAH_CUTI_DEFAULT} tahun ini.\n"
         f"Generating jadwal..."
     )
     await kirim_pdf(update, context)
+
+
+# ─────────────────────────────────────────────
+#  COMMAND: /cekjatah — cek sisa jatah cuti tahunan
+# ─────────────────────────────────────────────
+async def cekjatah(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    jatah = load_jatah_cuti()
+
+    if context.args:
+        nama = next((n for n in SEMUA_KARYAWAN if n.lower() == context.args[0].lower()), None)
+        if not nama:
+            await update.message.reply_text(
+                f"❌ Nama tidak dikenal.\n"
+                f"Pilihan: {', '.join(SEMUA_KARYAWAN)}"
+            )
+            return
+        sisa = jatah.get(nama, JATAH_CUTI_DEFAULT)
+        await update.message.reply_text(
+            f"📋 Sisa jatah cuti {nama}: {sisa}/{JATAH_CUTI_DEFAULT} tahun ini."
+        )
+        return
+
+    lines = ["📋 Sisa jatah cuti tahun ini:\n"]
+    lines.append("*Barista:*")
+    for nama in BARISTA:
+        sisa = jatah.get(nama, JATAH_CUTI_DEFAULT)
+        lines.append(f"• {nama}: {sisa}/{JATAH_CUTI_DEFAULT}")
+    lines.append("\n*Chef:*")
+    for nama in CHEF:
+        sisa = jatah.get(nama, JATAH_CUTI_DEFAULT)
+        lines.append(f"• {nama}: {sisa}/{JATAH_CUTI_DEFAULT}")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+# ─────────────────────────────────────────────
+#  COMMAND: /setjatah — set/reset jatah cuti manual (admin)
+# ─────────────────────────────────────────────
+async def setjatah(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ Perintah ini hanya untuk admin.")
+        return
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            "Format: /setjatah [nama] [jumlah]\n"
+            "Contoh: /setjatah ucil 12\n\n"
+            "Tips: /setjatah semua [jumlah] untuk reset semua karyawan sekaligus."
+        )
+        return
+
+    nama_input = context.args[0].lower()
+    try:
+        jumlah = int(context.args[1])
+    except ValueError:
+        await update.message.reply_text("❌ Jumlah harus berupa angka.")
+        return
+    if jumlah < 0:
+        await update.message.reply_text("❌ Jumlah tidak boleh negatif.")
+        return
+
+    jatah = load_jatah_cuti()
+
+    if nama_input == "semua":
+        for nama in SEMUA_KARYAWAN:
+            jatah[nama] = jumlah
+        save_jatah_cuti(jatah)
+        await update.message.reply_text(
+            f"✅ Jatah cuti SEMUA karyawan di-set jadi {jumlah}."
+        )
+        return
+
+    nama = next((n for n in SEMUA_KARYAWAN if n.lower() == nama_input), None)
+    if not nama:
+        await update.message.reply_text(
+            f"❌ Nama tidak dikenal.\n"
+            f"Pilihan: {', '.join(SEMUA_KARYAWAN)}, atau 'semua'"
+        )
+        return
+
+    jatah[nama] = jumlah
+    save_jatah_cuti(jatah)
+    await update.message.reply_text(
+        f"✅ Jatah cuti {nama} di-set jadi {jumlah}."
+    )
 
 
 # ─────────────────────────────────────────────
@@ -1639,6 +1776,8 @@ def main():
     app.add_handler(CommandHandler("start",         start))
     app.add_handler(CommandHandler("cuti",          cuti))
     app.add_handler(CommandHandler("batalcuti",     batalcuti))
+    app.add_handler(CommandHandler("cekjatah",      cekjatah))
+    app.add_handler(CommandHandler("setjatah",      setjatah))
     app.add_handler(CommandHandler("pindahlibur",   pindahlibur))
     app.add_handler(CommandHandler("batallibur",    batallibur))
     app.add_handler(CommandHandler("pulihkanlibur", pulihkanlibur))
