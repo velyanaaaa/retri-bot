@@ -170,11 +170,15 @@ def hitung_jadwal_barista_seminggu(week_data):
     """
     - Hari normal (cuma libur tetap terjadwal, sesuai LIBUR_TETAP_BARISTA) →
       pakai jadwal fix dari JADWAL_BARISTA (sesuai papan tulis).
-    - Kalau ada tambahan yang TIDAK masuk di luar libur tetap normal (cuti
-      mendadak / pindah libur tambahan) → shift dihitung ulang dinamis:
-        * sisa 3 orang masuk → 06:30, 08:30, 09:30 (masing-masing 1 orang)
-        * sisa 2 orang masuk → 06:30 & 09:30 (08:30 di-skip)
-      Rotasi fairness: yang paling jarang dapat jam tertentu diprioritaskan.
+    - Kalau ada 1 orang tambahan yang TIDAK masuk di luar libur tetap normal
+      (cuti mendadak / pindah libur tambahan), sisa 3 orang masuk:
+        * Orang yang jam fix-nya SUDAH UNIK (tidak sama dengan siapa pun,
+          termasuk yang cuti) di hari itu → TETAP di jam fix-nya, tidak digeser.
+        * Orang yang jam fix-nya SAMA (double) dengan orang yang cuti →
+          salah satunya (rotasi fairness) digeser mengisi slot 08:30 yang
+          kosong, sisanya tetap di jam fix.
+    - Kalau ada 2 orang (atau lebih) yang tidak masuk sekaligus, sisa 2 orang
+      masuk → dipaksa ke 06:30 & 09:30 saja (08:30 di-skip), rotasi fairness.
     - Yang tidak masuk ditandai LIBUR.
     """
     hasil = {hari: {} for hari in HARI_VALID}
@@ -194,15 +198,44 @@ def hitung_jadwal_barista_seminggu(week_data):
             # Hari normal (paling banyak 1 orang libur tetap): pakai jadwal fix
             for nama in masuk:
                 hasil[hari][nama] = JADWAL_BARISTA[hari][nama]
-        else:
-            # Ada tambahan yang gak masuk: hitung ulang shift dinamis
-            if len(masuk) == 3:
-                shift_tersedia = ["06:30", "08:30", "09:30"]
-            else:
-                shift_tersedia = ["06:30", "09:30"]
 
+        elif len(masuk) == 3:
+            # 1 orang tambahan gak masuk: pertahankan yang jamnya sudah unik,
+            # cuma geser yang double dengan orang yang gak masuk
+            jam_fix_masuk = {nama: JADWAL_BARISTA[hari][nama] for nama in masuk}
+            hitung_jam    = {}
+            for jam in jam_fix_masuk.values():
+                hitung_jam[jam] = hitung_jam.get(jam, 0) + 1
+
+            perlu_geser = []
+            for nama in masuk:
+                jam = jam_fix_masuk[nama]
+                if hitung_jam[jam] == 1:
+                    # Unik (tidak double dengan siapa pun yang masih masuk) → tetap
+                    hasil[hari][nama] = jam
+                else:
+                    perlu_geser.append(nama)
+
+            # Slot yang sudah terisi vs yang masih kosong dari 3 slot standar
+            slot_standar = ["06:30", "08:30", "09:30"]
+            slot_terisi  = set(hasil[hari][n] for n in masuk if n not in perlu_geser)
+            slot_kosong  = [j for j in slot_standar if j not in slot_terisi]
+
+            # Bagikan slot kosong ke yang perlu digeser, rotasi fairness
+            sisa = list(perlu_geser)
+            for jam in slot_kosong:
+                if not sisa:
+                    break
+                kandidat = sorted(sisa, key=lambda n: dapat[n][jam])
+                terpilih = kandidat[0]
+                hasil[hari][terpilih] = jam
+                dapat[terpilih][jam] += 1
+                sisa.remove(terpilih)
+
+        else:
+            # 2 orang (atau lebih) gak masuk sekaligus: paksa 06:30 & 09:30 saja
             sisa_masuk = list(masuk)
-            for jam in shift_tersedia:
+            for jam in ["06:30", "09:30"]:
                 if not sisa_masuk:
                     break
                 kandidat = sorted(sisa_masuk, key=lambda n: dapat[n][jam])
@@ -210,7 +243,7 @@ def hitung_jadwal_barista_seminggu(week_data):
                 hasil[hari][terpilih] = jam
                 dapat[terpilih][jam] += 1
                 sisa_masuk.remove(terpilih)
-            # Kalau masih ada sisa (4 orang tetap masuk, edge case), isi pakai jadwal fix
+            # Edge case: kalau masih ada sisa, isi pakai jadwal fix
             for nama in sisa_masuk:
                 hasil[hari][nama] = JADWAL_BARISTA[hari][nama]
 
