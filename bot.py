@@ -6,7 +6,7 @@ Gabungan bot jadwal shift & bot overtime karyawan.
 - Command overtime (/ot, /rekap, /history, dst) → generate PDF overtime
 """
 
-import os, json, logging
+import os, json, logging, zipfile
 from datetime import datetime, timedelta
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
@@ -19,8 +19,14 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_IDS = [int(x) for x in os.environ.get("ADMIN_IDS", "").split(",") if x.strip()]
 
-DATA_FILE      = "cuti_requests.json"   # data jadwal (mingguan)
-JATAH_CUTI_FILE = "jatah_cuti.json"     # data sisa jatah cuti tahunan per karyawan
+# Folder tempat data disimpan. Kalau Railway Volume di-mount di sini (lewat env
+# DATA_DIR), data akan PERSIST antar deploy. Kalau env DATA_DIR tidak di-set,
+# fallback ke folder saat ini (perilaku lama — data hilang tiap deploy).
+DATA_DIR = os.environ.get("DATA_DIR", ".")
+os.makedirs(DATA_DIR, exist_ok=True)
+
+DATA_FILE       = os.path.join(DATA_DIR, "cuti_requests.json")  # data jadwal (mingguan)
+JATAH_CUTI_FILE  = os.path.join(DATA_DIR, "jatah_cuti.json")    # data sisa jatah cuti tahunan per karyawan
 JATAH_CUTI_DEFAULT = 12                 # jatah cuti per tahun (sama rata semua karyawan)
 
 HARI_VALID = ["senin", "selasa", "rabu", "kamis", "jumat", "sabtu", "minggu"]
@@ -596,7 +602,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "▸ /jadwal\n"
             "  Generate & kirim PDF jadwal minggu ini\n\n"
             "⏱ /startovertime\n"
-            "  Lihat daftar perintah untuk fitur Overtime"
+            "  Lihat daftar perintah untuk fitur Overtime\n\n"
+            "💾 /backupdata\n"
+            "  Kirim file backup data (cuti, jatah cuti, overtime)\n"
+            "  Kirim ulang file .zip ini ke bot untuk restore data"
         )
     else:
         msg = (
@@ -1094,7 +1103,7 @@ async def jadwal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 TARIF_OT = 25_000  # Rp per jam
-OT_DATA_FILE = "overtime_data.json"   # data overtime (bulanan)
+OT_DATA_FILE = os.path.join(DATA_DIR, "overtime_data.json")   # data overtime (bulanan)
 
 # ─────────────────────────────────────────────
 #  KARYAWAN (reuse BARISTA/CHEF dari bagian jadwal)
@@ -1538,6 +1547,98 @@ async def terima_file_absensi(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 # ─────────────────────────────────────────────
+#  COMMAND: /backupdata — kirim semua data (cuti, jatah cuti, overtime) sebagai file .zip
+#  Berguna sebelum pindah akun Railway, biar data bisa di-restore lagi.
+# ─────────────────────────────────────────────
+async def backupdata(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ Hanya admin.")
+        return
+
+    file_list = [DATA_FILE, JATAH_CUTI_FILE, OT_DATA_FILE]
+    ada_file  = [f for f in file_list if os.path.exists(f)]
+
+    if not ada_file:
+        await update.message.reply_text("ℹ️ Belum ada data untuk di-backup.")
+        return
+
+    zip_path = f"backup_retribot_{datetime.now().strftime('%Y%m%d_%H%M')}.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        for f in ada_file:
+            zf.write(f, arcname=os.path.basename(f))
+
+    with open(zip_path, "rb") as f:
+        await update.message.reply_document(
+            document=f,
+            filename=os.path.basename(zip_path),
+            caption=(
+                "💾 Backup data bot (cuti, jatah cuti, overtime).\n\n"
+                "Cara restore: kirim file .zip ini lagi ke chat bot "
+                "(setelah bot jalan di server/akun baru), bot otomatis "
+                "membaca dan mengembalikan datanya."
+            )
+        )
+    os.remove(zip_path)
+
+
+# ─────────────────────────────────────────────
+#  HANDLER: terima file .zip → restore backup data
+# ─────────────────────────────────────────────
+async def terima_file_backup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return
+
+    doc = update.message.document
+    if not doc or not doc.file_name.lower().endswith(".zip"):
+        return  # bukan file zip, biarkan handler lain (misal absensi) yang proses
+
+    status_msg = await update.message.reply_text("⏳ File backup diterima, memulihkan data...")
+
+    try:
+        tg_file    = await doc.get_file()
+        file_bytes = bytes(await tg_file.download_as_bytearray())
+
+        tmp_zip = "restore_tmp.zip"
+        with open(tmp_zip, "wb") as f:
+            f.write(file_bytes)
+
+        nama_valid_files = {
+            os.path.basename(DATA_FILE),
+            os.path.basename(JATAH_CUTI_FILE),
+            os.path.basename(OT_DATA_FILE),
+        }
+
+        dipulihkan = []
+        with zipfile.ZipFile(tmp_zip, "r") as zf:
+            for name in zf.namelist():
+                if name not in nama_valid_files:
+                    continue  # abaikan file asing yang gak dikenal, biar aman
+                target_path = os.path.join(DATA_DIR, name)
+                with zf.open(name) as src, open(target_path, "wb") as dst:
+                    dst.write(src.read())
+                dipulihkan.append(name)
+
+        os.remove(tmp_zip)
+
+        if not dipulihkan:
+            await status_msg.edit_text(
+                "❌ Tidak ada file yang dikenali di dalam .zip ini. "
+                "Pastikan ini file backup yang dihasilkan dari /backupdata."
+            )
+            return
+
+        await status_msg.edit_text(
+            "✅ Data berhasil dipulihkan:\n"
+            + "\n".join(f"• {n}" for n in dipulihkan)
+            + "\n\nCoba cek /cekjatah atau /semuasaldo untuk memastikan."
+        )
+
+    except Exception as e:
+        logger.exception("Gagal restore backup")
+        await status_msg.edit_text(f"❌ Gagal memulihkan data: {e}")
+
+
+# ─────────────────────────────────────────────
 #  COMMAND: /start
 # ─────────────────────────────────────────────
 async def start_overtime(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1802,8 +1903,10 @@ def main():
     app.add_handler(CommandHandler("rekap",         rekap))
     app.add_handler(CommandHandler("history",       history))
     app.add_handler(CommandHandler("tutupbulan",    tutup_bulan))
+    app.add_handler(CommandHandler("backupdata",    backupdata))
 
-    # ── Handler file absensi (.txt) ──
+    # ── Handler file upload (.zip = restore backup, .txt = absensi) ──
+    app.add_handler(MessageHandler(filters.Document.ALL, terima_file_backup))
     app.add_handler(MessageHandler(filters.Document.ALL, terima_file_absensi))
 
     logger.info("Bot Café Retri (Jadwal + Overtime) berjalan...")
