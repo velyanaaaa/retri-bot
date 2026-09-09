@@ -1910,6 +1910,29 @@ async def terima_file_inventory(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 # ─────────────────────────────────────────────
+#  ROUTER: satu-satunya MessageHandler untuk semua upload dokumen.
+#  Telegram bot library berhenti di handler pertama yang match filter-nya
+#  (filters.Document.ALL cocok untuk SEMUA jenis file), jadi kalau backup/
+#  inventory/absensi didaftarkan sebagai MessageHandler terpisah, cuma yang
+#  didaftarkan PALING AWAL yang akan pernah jalan. Router ini menyatukan
+#  ketiganya jadi satu handler yang memilih berdasarkan ekstensi file.
+# ─────────────────────────────────────────────
+async def router_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    doc = update.message.document
+    if not doc or not doc.file_name:
+        return
+
+    nama_file = doc.file_name.lower()
+    if nama_file.endswith(".zip"):
+        await terima_file_backup(update, context)
+    elif nama_file.endswith(".xlsx"):
+        await terima_file_inventory(update, context)
+    elif nama_file.endswith(".txt"):
+        await terima_file_absensi(update, context)
+    # ekstensi lain: abaikan, tidak ada handler yang cocok
+
+
+# ─────────────────────────────────────────────
 #  COMMAND: /start
 # ─────────────────────────────────────────────
 async def start_overtime(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2182,9 +2205,7 @@ def main():
     app.add_handler(CommandHandler("cekstok",       cekstok))
 
     # ── Handler file upload (.zip = restore backup, .xlsx = inventory, .txt = absensi) ──
-    app.add_handler(MessageHandler(filters.Document.ALL, terima_file_backup))
-    app.add_handler(MessageHandler(filters.Document.ALL, terima_file_inventory))
-    app.add_handler(MessageHandler(filters.Document.ALL, terima_file_absensi))
+    app.add_handler(MessageHandler(filters.Document.ALL, router_file_upload))
 
     logger.info("Bot Café Retri (Jadwal + Overtime) berjalan...")
     app.run_polling()
