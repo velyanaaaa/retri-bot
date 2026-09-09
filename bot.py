@@ -12,6 +12,7 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
 
 from absensi_import import parse_absensi_txt, generate_pdf_absensi, rekap_ringkas
+from inventory_import import parse_inventory_xlsx, cocokkan_nama_barang
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -28,6 +29,8 @@ os.makedirs(DATA_DIR, exist_ok=True)
 DATA_FILE       = os.path.join(DATA_DIR, "cuti_requests.json")  # data jadwal (mingguan)
 JATAH_CUTI_FILE  = os.path.join(DATA_DIR, "jatah_cuti.json")    # data sisa jatah cuti tahunan per karyawan
 JATAH_CUTI_DEFAULT = 12                 # jatah cuti per tahun (sama rata semua karyawan)
+
+INVENTORY_FILE = os.path.join(DATA_DIR, "inventory.json")   # data baseline & batas minimum stok
 
 HARI_VALID = ["senin", "selasa", "rabu", "kamis", "jumat", "sabtu", "minggu"]
 
@@ -148,6 +151,35 @@ def kembalikan_jatah_cuti(nama):
     data[nama] = data.get(nama, JATAH_CUTI_DEFAULT) + 1
     save_jatah_cuti(data)
     return data[nama]
+
+
+# ─────────────────────────────────────────────
+#  HELPER: INVENTORY (baseline & batas minimum stok)
+# ─────────────────────────────────────────────
+INVENTORY_AMBANG_DEFAULT = 0.20  # 20% dari baseline
+
+def load_inventory():
+    """
+    Load data inventory. Format:
+    {
+      "Nama Barang": {
+        "unit": "Kg",
+        "baseline": 7.0,   # stok saat /setbaseline dijalankan (dianggap "penuh")
+        "batas_min": 1.4,  # ambang alert (default 20% dari baseline, atau di-set manual)
+        "stock_terakhir": 7.0,
+        "updated_at": "2026-09-01T10:00:00"
+      },
+      ...
+    }
+    """
+    if os.path.exists(INVENTORY_FILE):
+        with open(INVENTORY_FILE) as f:
+            return json.load(f)
+    return {}
+
+def save_inventory(data):
+    with open(INVENTORY_FILE, "w") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
 
 
 # ─────────────────────────────────────────────
@@ -604,8 +636,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "⏱ /startovertime\n"
             "  Lihat daftar perintah untuk fitur Overtime\n\n"
             "💾 /backupdata\n"
-            "  Kirim file backup data (cuti, jatah cuti, overtime)\n"
-            "  Kirim ulang file .zip ini ke bot untuk restore data"
+            "  Kirim file backup data (cuti, jatah cuti, overtime, inventory)\n"
+            "  Kirim ulang file .zip ini ke bot untuk restore data\n\n"
+            "📦 /setbaseline\n"
+            "  Set stok saat ini sebagai baseline (kirim .xlsx setelahnya)\n\n"
+            "📦 /setbatas [nama_barang] [jumlah]\n"
+            "  Set/ubah batas minimum stok satu barang\n"
+            "  Contoh: /setbatas Lemongrass 500\n\n"
+            "📦 /cekstok\n"
+            "  Lihat status stok semua barang\n\n"
+            "📦 Kirim file .XLSX (laporan stok harian)\n"
+            "  Bot otomatis cek & kirim alert barang yang mepet/habis"
         )
     else:
         msg = (
@@ -1555,7 +1596,7 @@ async def backupdata(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Hanya admin.")
         return
 
-    file_list = [DATA_FILE, JATAH_CUTI_FILE, OT_DATA_FILE]
+    file_list = [DATA_FILE, JATAH_CUTI_FILE, OT_DATA_FILE, INVENTORY_FILE]
     ada_file  = [f for f in file_list if os.path.exists(f)]
 
     if not ada_file:
@@ -1606,6 +1647,7 @@ async def terima_file_backup(update: Update, context: ContextTypes.DEFAULT_TYPE)
             os.path.basename(DATA_FILE),
             os.path.basename(JATAH_CUTI_FILE),
             os.path.basename(OT_DATA_FILE),
+            os.path.basename(INVENTORY_FILE),
         }
 
         dipulihkan = []
@@ -1636,6 +1678,235 @@ async def terima_file_backup(update: Update, context: ContextTypes.DEFAULT_TYPE)
     except Exception as e:
         logger.exception("Gagal restore backup")
         await status_msg.edit_text(f"❌ Gagal memulihkan data: {e}")
+
+
+# ─────────────────────────────────────────────
+#  COMMAND: /setbaseline — set stok saat ini sebagai "penuh" (100%)
+#  Batas minimum otomatis = 20% dari baseline. Barang dengan stok 0/kosong
+#  di-skip (tidak dikasih batas otomatis, tunggu /setbatas manual).
+# ─────────────────────────────────────────────
+async def setbaseline_pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Instruksi untuk /setbaseline — minta admin upload file Excel."""
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ Hanya admin.")
+        return
+    context.user_data["menunggu_baseline"] = True
+    await update.message.reply_text(
+        "📤 Kirim file Excel (.xlsx) stok sekarang untuk dijadikan BASELINE "
+        "(stok saat ini dianggap 100% penuh, batas alert otomatis = 20% dari situ).\n\n"
+        "Barang dengan stok 0/kosong di file ini akan dilewati (tidak dikasih "
+        "batas otomatis) — atur manual nanti pakai /setbatas."
+    )
+
+
+def _hitung_dan_simpan_baseline(hasil_parse: list):
+    """Simpan baseline baru dari hasil parse Excel. Return (jumlah_diset, jumlah_dilewati)."""
+    inventory = load_inventory()
+    now = datetime.now().isoformat()
+    diset, dilewati = 0, 0
+
+    for item in hasil_parse:
+        nama, stock, unit = item["nama"], item["stock"], item["unit"]
+        if stock is None or stock <= 0:
+            dilewati += 1
+            continue
+        inventory[nama] = {
+            "unit": unit,
+            "baseline": stock,
+            "batas_min": round(stock * INVENTORY_AMBANG_DEFAULT, 2),
+            "stock_terakhir": stock,
+            "updated_at": now,
+        }
+        diset += 1
+
+    save_inventory(inventory)
+    return diset, dilewati
+
+
+# ─────────────────────────────────────────────
+#  COMMAND: /setbatas — set/ubah batas minimum manual satu barang
+# ─────────────────────────────────────────────
+async def setbatas(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ Hanya admin.")
+        return
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            "Format: /setbatas [nama_barang] [jumlah]\n"
+            "Contoh: /setbatas \"Coffee Bean\" 2\n"
+            "Contoh: /setbatas Lemongrass 500\n\n"
+            "Nama barang boleh multi-kata tanpa tanda kutip, "
+            "angka terakhir akan dianggap batas minimumnya."
+        )
+        return
+
+    try:
+        jumlah = float(context.args[-1].replace(",", "."))
+    except ValueError:
+        await update.message.reply_text("❌ Jumlah (argumen terakhir) harus berupa angka.")
+        return
+
+    nama_input = " ".join(context.args[:-1]).strip('"')
+    if not nama_input:
+        await update.message.reply_text("❌ Nama barang tidak boleh kosong.")
+        return
+
+    inventory = load_inventory()
+    nama_cocok = cocokkan_nama_barang(nama_input, list(inventory.keys()))
+
+    if nama_cocok:
+        inventory[nama_cocok]["batas_min"] = jumlah
+        save_inventory(inventory)
+        await update.message.reply_text(
+            f"✅ Batas minimum {nama_cocok} di-set jadi {jumlah}."
+        )
+    else:
+        # Barang baru, belum ada di inventory sama sekali
+        inventory[nama_input] = {
+            "unit": "",
+            "baseline": None,
+            "batas_min": jumlah,
+            "stock_terakhir": None,
+            "updated_at": datetime.now().isoformat(),
+        }
+        save_inventory(inventory)
+        await update.message.reply_text(
+            f"✅ Batas minimum {nama_input} (barang baru) di-set jadi {jumlah}."
+        )
+
+
+# ─────────────────────────────────────────────
+#  COMMAND: /cekstok — lihat status stok semua barang
+# ─────────────────────────────────────────────
+async def cekstok(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    inventory = load_inventory()
+    if not inventory:
+        await update.message.reply_text(
+            "ℹ️ Belum ada data inventory. Gunakan /setbaseline dulu untuk memulai."
+        )
+        return
+
+    mepet, aman, belum_ada_batas = [], [], []
+    for nama, info in inventory.items():
+        stock = info.get("stock_terakhir")
+        batas = info.get("batas_min")
+        unit  = info.get("unit", "")
+
+        if stock is None:
+            continue  # belum pernah ada data stok
+        if batas is None:
+            belum_ada_batas.append((nama, stock, unit))
+        elif stock <= batas:
+            mepet.append((nama, stock, batas, unit))
+        else:
+            aman.append((nama, stock, unit))
+
+    lines = ["📦 Status Stok Inventory\n"]
+
+    if mepet:
+        lines.append("🔴 *Perlu di-reorder:*")
+        for nama, stock, batas, unit in sorted(mepet, key=lambda x: x[1]):
+            lines.append(f"• {nama}: {stock:g} {unit} (batas {batas:g})")
+        lines.append("")
+
+    if belum_ada_batas:
+        lines.append("⚪ *Belum ada batas minimum:*")
+        for nama, stock, unit in belum_ada_batas:
+            lines.append(f"• {nama}: {stock:g} {unit}")
+        lines.append("")
+
+    lines.append(f"🟢 Aman: {len(aman)} barang")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+# ─────────────────────────────────────────────
+#  HANDLER: terima file .xlsx → update stok inventory / set baseline
+# ─────────────────────────────────────────────
+async def terima_file_inventory(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return
+
+    doc = update.message.document
+    if not doc or not doc.file_name.lower().endswith(".xlsx"):
+        return  # bukan file xlsx, biarkan handler lain yang proses
+
+    status_msg = await update.message.reply_text("⏳ File stok diterima, memproses...")
+
+    try:
+        tg_file    = await doc.get_file()
+        file_bytes = bytes(await tg_file.download_as_bytearray())
+
+        hasil_parse = parse_inventory_xlsx(file_bytes)
+        if not hasil_parse:
+            await status_msg.edit_text(
+                "❌ Tidak ada data barang yang bisa dibaca dari file ini. Cek format file-nya."
+            )
+            return
+
+        # Mode /setbaseline
+        if context.user_data.get("menunggu_baseline"):
+            context.user_data["menunggu_baseline"] = False
+            diset, dilewati = _hitung_dan_simpan_baseline(hasil_parse)
+            await status_msg.edit_text(
+                f"✅ Baseline berhasil di-set!\n"
+                f"• {diset} barang dikasih batas minimum otomatis (20% dari stok saat ini)\n"
+                f"• {dilewati} barang dilewati (stok 0/kosong), atur manual pakai /setbatas\n\n"
+                f"Mulai sekarang, upload file stok harian akan otomatis dibandingkan ke baseline ini."
+            )
+            return
+
+        # Mode update harian biasa
+        inventory = load_inventory()
+        if not inventory:
+            await status_msg.edit_text(
+                "ℹ️ Belum ada baseline. Jalankan /setbaseline dulu sebelum upload stok harian."
+            )
+            return
+
+        now = datetime.now().isoformat()
+        nama_lama_list = list(inventory.keys())
+        mepet, tidak_dikenal = [], []
+
+        for item in hasil_parse:
+            nama, stock, unit = item["nama"], item["stock"], item["unit"]
+            if stock is None:
+                continue  # belum diisi hari ini, skip
+
+            nama_cocok = cocokkan_nama_barang(nama, nama_lama_list)
+            if not nama_cocok:
+                tidak_dikenal.append(nama)
+                continue
+
+            inventory[nama_cocok]["stock_terakhir"] = stock
+            inventory[nama_cocok]["updated_at"] = now
+            if unit:
+                inventory[nama_cocok]["unit"] = unit
+
+            batas = inventory[nama_cocok].get("batas_min")
+            if batas is not None and stock <= batas:
+                mepet.append((nama_cocok, stock, batas, inventory[nama_cocok].get("unit", "")))
+
+        save_inventory(inventory)
+
+        lines = [f"✅ Stok berhasil diperbarui dari {doc.file_name}.\n"]
+        if mepet:
+            lines.append("🔴 *Barang perlu di-reorder:*")
+            for nama, stock, batas, unit in sorted(mepet, key=lambda x: x[1]):
+                lines.append(f"• {nama}: {stock:g} {unit} (batas {batas:g})")
+        else:
+            lines.append("🟢 Semua barang masih aman, tidak ada yang di bawah batas minimum.")
+
+        if tidak_dikenal:
+            lines.append(f"\n⚪ {len(tidak_dikenal)} nama barang tidak dikenali (barang baru?): "
+                          + ", ".join(tidak_dikenal[:10])
+                          + (f" +{len(tidak_dikenal)-10} lainnya" if len(tidak_dikenal) > 10 else ""))
+
+        await status_msg.edit_text("\n".join(lines), parse_mode="Markdown")
+
+    except Exception as e:
+        logger.exception("Gagal proses file inventory")
+        await status_msg.edit_text(f"❌ Gagal memproses file: {e}")
 
 
 # ─────────────────────────────────────────────
@@ -1905,8 +2176,14 @@ def main():
     app.add_handler(CommandHandler("tutupbulan",    tutup_bulan))
     app.add_handler(CommandHandler("backupdata",    backupdata))
 
-    # ── Handler file upload (.zip = restore backup, .txt = absensi) ──
+    # ── Command inventory ──
+    app.add_handler(CommandHandler("setbaseline",   setbaseline_pending))
+    app.add_handler(CommandHandler("setbatas",      setbatas))
+    app.add_handler(CommandHandler("cekstok",       cekstok))
+
+    # ── Handler file upload (.zip = restore backup, .xlsx = inventory, .txt = absensi) ──
     app.add_handler(MessageHandler(filters.Document.ALL, terima_file_backup))
+    app.add_handler(MessageHandler(filters.Document.ALL, terima_file_inventory))
     app.add_handler(MessageHandler(filters.Document.ALL, terima_file_absensi))
 
     logger.info("Bot Café Retri (Jadwal + Overtime) berjalan...")
