@@ -261,44 +261,64 @@ def hitung_jadwal_barista_seminggu(week_data):
     hasil = {hari: {} for hari in HARI_VALID}
     dapat = {nama: {"06:30": 0, "08:30": 0, "09:30": 0} for nama in BARISTA}
 
+    pindah_libur = week_data.get("pindah_libur", {})
+
     for hari in HARI_VALID:
-        tidak_masuk       = siapa_tidak_masuk(hari, week_data, tim="barista")
-        masuk              = [n for n in BARISTA if n not in tidak_masuk]
-        libur_tetap_hari   = LIBUR_TETAP_BARISTA.get(hari)
+        tidak_masuk      = siapa_tidak_masuk(hari, week_data, tim="barista")
+        masuk             = [n for n in BARISTA if n not in tidak_masuk]
+        libur_tetap_hari  = LIBUR_TETAP_BARISTA.get(hari)
         # "Ekstra" tidak masuk = tidak_masuk di luar libur tetap terjadwal hari ini
         tidak_masuk_ekstra = [n for n in tidak_masuk if n != libur_tetap_hari]
 
         for nama in tidak_masuk:
             hasil[hari][nama] = "LIBUR"
 
-        if not tidak_masuk_ekstra:
-            # Hari normal (paling banyak 1 orang libur tetap): pakai jadwal fix
+        # Cek apakah ada orang yang masuk tapi jam fix-nya "LIBUR" di tabel.
+        # Ini terjadi saat swap pindah libur: orang yang normalnya libur hari ini
+        # sekarang masuk (karena liburnya dipindah), tapi JADWAL_BARISTA masih "LIBUR".
+        masuk_tapi_jam_invalid = [
+            n for n in masuk
+            if JADWAL_BARISTA[hari].get(n) in ("LIBUR", None)
+        ]
+        ada_jam_invalid = bool(masuk_tapi_jam_invalid)
+
+        if not tidak_masuk_ekstra and not ada_jam_invalid:
+            # Hari normal: semua jam fix valid, pakai langsung
             for nama in masuk:
                 hasil[hari][nama] = JADWAL_BARISTA[hari][nama]
 
         elif len(masuk) == 3:
-            # 1 orang tambahan gak masuk: pertahankan yang jamnya sudah unik,
-            # cuma geser yang double dengan orang yang gak masuk
-            jam_fix_masuk = {nama: JADWAL_BARISTA[hari][nama] for nama in masuk}
-            hitung_jam    = {}
+            # 3 orang masuk (1 ekstra libur atau swap): pertahankan jam valid & unik,
+            # alokasikan ulang yang double atau invalid (jam "LIBUR" karena swap).
+            jam_fix_masuk = {}
+            for nama in masuk:
+                j = JADWAL_BARISTA[hari].get(nama)
+                if j and j != "LIBUR":
+                    jam_fix_masuk[nama] = j
+
+            hitung_jam = {}
             for jam in jam_fix_masuk.values():
                 hitung_jam[jam] = hitung_jam.get(jam, 0) + 1
 
             perlu_geser = []
             for nama in masuk:
-                jam = jam_fix_masuk[nama]
-                if hitung_jam[jam] == 1:
-                    # Unik (tidak double dengan siapa pun yang masih masuk) → tetap
-                    hasil[hari][nama] = jam
-                else:
+                if nama not in jam_fix_masuk:
+                    # Jam fix-nya invalid (swap) → harus dapat slot baru
                     perlu_geser.append(nama)
+                else:
+                    jam = jam_fix_masuk[nama]
+                    if hitung_jam[jam] == 1:
+                        hasil[hari][nama] = jam
+                    else:
+                        perlu_geser.append(nama)
 
-            # Slot yang sudah terisi vs yang masih kosong dari 3 slot standar
             slot_standar = ["06:30", "08:30", "09:30"]
-            slot_terisi  = set(hasil[hari][n] for n in masuk if n not in perlu_geser)
+            slot_terisi  = set(
+                hasil[hari][n] for n in masuk
+                if n not in perlu_geser and hasil[hari].get(n) not in ("LIBUR", None)
+            )
             slot_kosong  = [j for j in slot_standar if j not in slot_terisi]
 
-            # Bagikan slot kosong ke yang perlu digeser, rotasi fairness
             sisa = list(perlu_geser)
             for jam in slot_kosong:
                 if not sisa:
@@ -310,7 +330,7 @@ def hitung_jadwal_barista_seminggu(week_data):
                 sisa.remove(terpilih)
 
         else:
-            # 2 orang (atau lebih) gak masuk sekaligus: paksa 06:30 & 09:30 saja
+            # 2 orang (atau lebih) tidak masuk: paksa 06:30 & 09:30 saja
             sisa_masuk = list(masuk)
             for jam in ["06:30", "09:30"]:
                 if not sisa_masuk:
@@ -320,9 +340,19 @@ def hitung_jadwal_barista_seminggu(week_data):
                 hasil[hari][terpilih] = jam
                 dapat[terpilih][jam] += 1
                 sisa_masuk.remove(terpilih)
-            # Edge case: kalau masih ada sisa, isi pakai jadwal fix
+            # Kalau masih ada sisa & jam fix valid, pakai jam fix
             for nama in sisa_masuk:
-                hasil[hari][nama] = JADWAL_BARISTA[hari][nama]
+                j = JADWAL_BARISTA[hari].get(nama)
+                if j and j != "LIBUR":
+                    hasil[hari][nama] = j
+                else:
+                    # Jam fix invalid (swap), paksa slot yang masih kosong
+                    slot_sisa = [
+                        j2 for j2 in ["06:30", "08:30", "09:30"]
+                        if j2 not in hasil[hari].values()
+                    ]
+                    if slot_sisa:
+                        hasil[hari][nama] = slot_sisa[0]
 
     return hasil
 
@@ -363,21 +393,29 @@ def hitung_jadwal_chef_seminggu(week_data):
     dapat = {nama: {"06:30": 0, "09:30": 0} for nama in CHEF}
 
     for hari in HARI_VALID:
-        tidak_masuk       = siapa_tidak_masuk(hari, week_data, tim="chef")
-        masuk              = [n for n in CHEF if n not in tidak_masuk]
-        libur_tetap_hari   = LIBUR_TETAP_CHEF.get(hari)
+        tidak_masuk      = siapa_tidak_masuk(hari, week_data, tim="chef")
+        masuk             = [n for n in CHEF if n not in tidak_masuk]
+        libur_tetap_hari  = LIBUR_TETAP_CHEF.get(hari)
         # "Ekstra" tidak masuk = tidak_masuk di luar libur tetap terjadwal hari ini
         tidak_masuk_ekstra = [n for n in tidak_masuk if n != libur_tetap_hari]
 
         for nama in tidak_masuk:
             hasil[hari][nama] = "LIBUR"
 
-        if not tidak_masuk_ekstra:
-            # Hari normal (paling banyak 1 orang libur tetap): pakai jadwal fix
+        # Sama seperti barista: cek apakah ada orang masuk tapi jam fix-nya "LIBUR"
+        # (akibat swap pindah libur)
+        masuk_tapi_jam_invalid = [
+            n for n in masuk
+            if JADWAL_CHEF[hari].get(n) in ("LIBUR", None)
+        ]
+        ada_jam_invalid = bool(masuk_tapi_jam_invalid)
+
+        if not tidak_masuk_ekstra and not ada_jam_invalid:
+            # Hari normal: pakai jadwal fix
             for nama in masuk:
                 hasil[hari][nama] = JADWAL_CHEF[hari][nama]
         else:
-            # Ada tambahan yang gak masuk: cover 06:30 & 09:30 via rotasi fairness
+            # Ada ekstra tidak masuk ATAU ada jam invalid (swap): cover 06:30 & 09:30
             sisa_masuk = list(masuk)
             for jam in ["06:30", "09:30"]:
                 if not sisa_masuk:
@@ -387,9 +425,19 @@ def hitung_jadwal_chef_seminggu(week_data):
                 hasil[hari][terpilih] = jam
                 dapat[terpilih][jam] += 1
                 sisa_masuk.remove(terpilih)
-            # Kalau masih ada sisa (3 orang tetap masuk, edge case), isi pakai jadwal fix
+            # Kalau masih ada sisa, pakai jam fix (kalau valid)
             for nama in sisa_masuk:
-                hasil[hari][nama] = JADWAL_CHEF[hari][nama]
+                j = JADWAL_CHEF[hari].get(nama)
+                if j and j != "LIBUR":
+                    hasil[hari][nama] = j
+                else:
+                    # Jam fix invalid (swap), paksa slot yang masih kosong
+                    slot_sisa = [
+                        j2 for j2 in ["06:30", "08:00", "09:30"]
+                        if j2 not in hasil[hari].values()
+                    ]
+                    if slot_sisa:
+                        hasil[hari][nama] = slot_sisa[0]
 
     return hasil
 
