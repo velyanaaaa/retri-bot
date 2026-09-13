@@ -705,8 +705,12 @@ async def cuti(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Cek: sudah ada karyawan lain yang tidak masuk di hari itu (tim yang sama)
     tidak_masuk = siapa_tidak_masuk(hari, week_data, tim=tim)
-    if tidak_masuk:
-        konflik = tidak_masuk[0]
+    # Libur tetap asli hari itu tidak dihitung sebagai konflik —
+    # boleh ada 1 cuti/pindah libur bersamaan dengan libur tetap terjadwal.
+    libur_tetap_hari = libur_tetap_map.get(hari)
+    konflik_nyata = [n for n in tidak_masuk if n != nama and n != libur_tetap_hari]
+    if konflik_nyata:
+        konflik = konflik_nyata[0]
         # Cari hari alternatif yang kosong untuk nama ini
         hari_tersedia = []
         for h in HARI_VALID:
@@ -714,7 +718,9 @@ async def cuti(update: Update, context: ContextTypes.DEFAULT_TYPE):
             lt = libur_tetap_map.get(h)
             if lt == nama:
                 continue  # Hari libur tetap dia sendiri, skip
-            if not tm and h != hari:
+            lt_h = libur_tetap_map.get(h)
+            konflik_h = [n for n in tm if n != lt_h]
+            if not konflik_h and h != hari:
                 hari_tersedia.append(h.capitalize())
         saran = (
             f"\n\n💡 Hari yang tersedia untuk cuti {nama}:\n"
@@ -1065,8 +1071,10 @@ async def pindahlibur(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Cek: sudah ada karyawan lain yang tidak masuk di hari_baru (tim yang sama)
     tidak_masuk_di_hari_baru = siapa_tidak_masuk(hari_baru, week_data, tim=tim)
-    # Filter: keluarkan nama itu sendiri dari pengecekan (kalau sebelumnya udah dipindah ke sini)
-    konflik = [n for n in tidak_masuk_di_hari_baru if n != nama]
+    # Filter: keluarkan diri sendiri + libur tetap asli hari_baru dari pengecekan.
+    # Libur tetap terjadwal boleh "bersamaan" dengan 1 pindah libur tambahan.
+    libur_tetap_hari_baru = libur_tetap_map.get(hari_baru)
+    konflik = [n for n in tidak_masuk_di_hari_baru if n != nama and n != libur_tetap_hari_baru]
     if konflik:
         await update.message.reply_text(
             f"❌ {konflik[0]} sudah tidak masuk di {hari_baru.capitalize()}.\n"
