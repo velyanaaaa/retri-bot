@@ -354,6 +354,18 @@ def hitung_jadwal_barista_seminggu(week_data):
                     if slot_sisa:
                         hasil[hari][nama] = slot_sisa[0]
 
+    # Terapkan tukar jam: swap jam dua orang di hari tertentu
+    for entry in week_data.get("tukar_jam", []):
+        h  = entry["hari"]
+        n1 = entry["nama1"]
+        n2 = entry["nama2"]
+        if n1 in BARISTA and n2 in BARISTA:
+            j1 = hasil[h].get(n1)
+            j2 = hasil[h].get(n2)
+            if j1 and j2 and j1 != "LIBUR" and j2 != "LIBUR":
+                hasil[h][n1] = j2
+                hasil[h][n2] = j1
+
     return hasil
 
 
@@ -438,6 +450,18 @@ def hitung_jadwal_chef_seminggu(week_data):
                     ]
                     if slot_sisa:
                         hasil[hari][nama] = slot_sisa[0]
+
+    # Terapkan tukar jam: swap jam dua orang di hari tertentu
+    for entry in week_data.get("tukar_jam", []):
+        h  = entry["hari"]
+        n1 = entry["nama1"]
+        n2 = entry["nama2"]
+        if n1 in CHEF and n2 in CHEF:
+            j1 = hasil[h].get(n1)
+            j2 = hasil[h].get(n2)
+            if j1 and j2 and j1 != "LIBUR" and j2 != "LIBUR":
+                hasil[h][n1] = j2
+                hasil[h][n2] = j1
 
     return hasil
 
@@ -677,6 +701,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "▸ /pulihkanlibur [hari] [tim]\n"
             "  Kembalikan libur tetap yang sudah dibatalkan\n"
             "  Contoh: /pulihkanlibur senin barista\n\n"
+            "▸ /tukarjam [hari] [nama1] [nama2]\n"
+            "  Tukar jam dua karyawan (tim sama) di hari itu\n"
+            "  Contoh: /tukarjam selasa dian ayuk\n\n"
+            "▸ /bataltukarjam [hari] [nama1] [nama2]\n"
+            "  Batalkan tukar jam\n"
+            "  Contoh: /bataltukarjam selasa dian ayuk\n\n"
             "▸ /daftarcuti\n"
             "  Lihat semua request cuti & perubahan libur minggu ini\n\n"
             "▸ /jadwal\n"
@@ -1144,6 +1174,145 @@ async def pindahlibur(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await kirim_pdf(update, context)
 
 
+
+
+# ─────────────────────────────────────────────
+#  COMMAND: /tukarjam — tukar jam dua karyawan di hari yang sama
+# ─────────────────────────────────────────────
+async def tukarjam(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ Perintah ini hanya untuk admin.")
+        return
+    if len(context.args) < 3:
+        await update.message.reply_text(
+            "Format: /tukarjam [hari] [nama1] [nama2]\n"
+            "Contoh: /tukarjam selasa dian ayuk\n\n"
+            "Jam kedua karyawan di hari itu akan ditukar.\n"
+            "Keduanya harus dari tim yang sama (barista / chef) dan harus masuk hari itu."
+        )
+        return
+
+    hari  = context.args[0].lower()
+    nama1 = next((n for n in SEMUA_KARYAWAN if n.lower() == context.args[1].lower()), None)
+    nama2 = next((n for n in SEMUA_KARYAWAN if n.lower() == context.args[2].lower()), None)
+
+    if hari not in HARI_VALID:
+        await update.message.reply_text(f"❌ Hari tidak valid.\nPilihan: {', '.join(HARI_VALID)}")
+        return
+    if not nama1:
+        await update.message.reply_text(f"❌ Nama pertama tidak dikenal.\nPilihan: {', '.join(SEMUA_KARYAWAN)}")
+        return
+    if not nama2:
+        await update.message.reply_text(f"❌ Nama kedua tidak dikenal.\nPilihan: {', '.join(SEMUA_KARYAWAN)}")
+        return
+    if nama1 == nama2:
+        await update.message.reply_text("❌ Nama pertama dan kedua tidak boleh sama.")
+        return
+
+    # Cek harus tim yang sama
+    tim1 = "barista" if nama1 in BARISTA else "chef"
+    tim2 = "barista" if nama2 in BARISTA else "chef"
+    if tim1 != tim2:
+        await update.message.reply_text(
+            f"❌ {nama1} ({tim1}) dan {nama2} ({tim2}) beda tim.\n"
+            f"Tukar jam hanya bisa dalam tim yang sama."
+        )
+        return
+
+    # Cek keduanya masuk di hari itu
+    week_key  = get_week_key()
+    all_data  = load_data()
+    week_data = all_data.get(week_key, {})
+
+    tidak_masuk = siapa_tidak_masuk(hari, week_data, tim=tim1)
+    if nama1 in tidak_masuk:
+        await update.message.reply_text(f"❌ {nama1} tidak masuk di {hari.capitalize()} (libur/cuti).")
+        return
+    if nama2 in tidak_masuk:
+        await update.message.reply_text(f"❌ {nama2} tidak masuk di {hari.capitalize()} (libur/cuti).")
+        return
+
+    # Cek duplikat
+    tukar_list = week_data.get("tukar_jam", [])
+    for entry in tukar_list:
+        if entry["hari"] == hari:
+            n1e, n2e = entry["nama1"], entry["nama2"]
+            if set([nama1, nama2]) == set([n1e, n2e]):
+                await update.message.reply_text(
+                    f"ℹ️ Tukar jam {nama1} & {nama2} di {hari.capitalize()} sudah ada."
+                )
+                return
+            # Cek apakah salah satu nama sudah terlibat tukar jam di hari itu
+            if nama1 in (n1e, n2e) or nama2 in (n1e, n2e):
+                await update.message.reply_text(
+                    f"❌ {nama1 if nama1 in (n1e, n2e) else nama2} sudah terlibat tukar jam "
+                    f"di {hari.capitalize()} dengan orang lain.\n"
+                    f"Batalkan tukar jam yang ada dulu dengan /bataltukarjam."
+                )
+                return
+
+    tukar_list.append({"hari": hari, "nama1": nama1, "nama2": nama2})
+    week_data["tukar_jam"] = tukar_list
+    all_data[week_key] = week_data
+    save_data(all_data)
+
+    await update.message.reply_text(
+        f"✅ Tukar jam {nama1} & {nama2} di {hari.capitalize()} berhasil dicatat!\n"
+        f"Generating jadwal..."
+    )
+    await kirim_pdf(update, context)
+
+
+# ─────────────────────────────────────────────
+#  COMMAND: /bataltukarjam — batalkan tukar jam
+# ─────────────────────────────────────────────
+async def bataltukarjam(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ Perintah ini hanya untuk admin.")
+        return
+    if len(context.args) < 3:
+        await update.message.reply_text(
+            "Format: /bataltukarjam [hari] [nama1] [nama2]\n"
+            "Contoh: /bataltukarjam selasa dian ayuk"
+        )
+        return
+
+    hari  = context.args[0].lower()
+    nama1 = next((n for n in SEMUA_KARYAWAN if n.lower() == context.args[1].lower()), None)
+    nama2 = next((n for n in SEMUA_KARYAWAN if n.lower() == context.args[2].lower()), None)
+
+    if not nama1 or not nama2:
+        await update.message.reply_text("❌ Nama tidak dikenal.")
+        return
+
+    week_key  = get_week_key()
+    all_data  = load_data()
+    week_data = all_data.get(week_key, {})
+    tukar_list = week_data.get("tukar_jam", [])
+
+    before = len(tukar_list)
+    tukar_list = [
+        e for e in tukar_list
+        if not (e["hari"] == hari and set([e["nama1"], e["nama2"]]) == set([nama1, nama2]))
+    ]
+
+    if len(tukar_list) == before:
+        await update.message.reply_text(
+            f"ℹ️ Tidak ada tukar jam {nama1} & {nama2} di {hari.capitalize()}."
+        )
+        return
+
+    week_data["tukar_jam"] = tukar_list
+    all_data[week_key] = week_data
+    save_data(all_data)
+
+    await update.message.reply_text(
+        f"✅ Tukar jam {nama1} & {nama2} di {hari.capitalize()} dibatalkan.\n"
+        f"Generating jadwal..."
+    )
+    await kirim_pdf(update, context)
+
+
 # ─────────────────────────────────────────────
 #  COMMAND: /daftarcuti — lihat status minggu ini
 # ─────────────────────────────────────────────
@@ -1182,6 +1351,14 @@ async def daftarcuti(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for item in dibatalkan:
             hari, nama = item.split("_", 1)
             msg += f"  • {nama} masuk di {hari.capitalize()}\n"
+
+    tukar_req = week_data.get("tukar_jam", [])
+    if tukar_req:
+        msg += "\nTukar Jam:\n"
+        for entry in tukar_req:
+            msg += f"  • {entry['nama1']} & {entry['nama2']} di {entry['hari'].capitalize()}\n"
+    else:
+        msg += "\nTidak ada tukar jam minggu ini.\n"
 
     await update.message.reply_text(msg)
 
@@ -2239,6 +2416,8 @@ def main():
     app.add_handler(CommandHandler("cekjatah",      cekjatah))
     app.add_handler(CommandHandler("setjatah",      setjatah))
     app.add_handler(CommandHandler("pindahlibur",   pindahlibur))
+    app.add_handler(CommandHandler("tukarjam",      tukarjam))
+    app.add_handler(CommandHandler("bataltukarjam", bataltukarjam))
     app.add_handler(CommandHandler("batallibur",    batallibur))
     app.add_handler(CommandHandler("pulihkanlibur", pulihkanlibur))
     app.add_handler(CommandHandler("daftarcuti",    daftarcuti))
