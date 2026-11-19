@@ -32,6 +32,19 @@ logging.basicConfig(level=logging.INFO)
 logging.getLogger("httpx").setLevel(logging.WARNING)  # jangan tampilkan URL (ada token bot) di log
 logger = logging.getLogger(__name__)
 
+
+def tulis_json_aman(path, data):
+    """Tulis JSON lewat file sementara lalu os.replace.
+
+    Kalau bot mati di tengah proses menulis, file asli tetap utuh
+    (nggak setengah tertulis / rusak)."""
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_IDS = [int(x) for x in os.environ.get("ADMIN_IDS", "").split(",") if x.strip()]
 
@@ -127,8 +140,7 @@ def load_data():
 
 def save_data(data):
     """Simpan data ke file JSON."""
-    with open(DATA_FILE, "w") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+    tulis_json_aman(DATA_FILE, data)
 
 
 # ─────────────────────────────────────────────
@@ -150,8 +162,7 @@ def load_jatah_cuti():
     return data
 
 def save_jatah_cuti(data):
-    with open(JATAH_CUTI_FILE, "w") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+    tulis_json_aman(JATAH_CUTI_FILE, data)
 
 def kurangi_jatah_cuti(nama):
     """Kurangi jatah cuti nama sebanyak 1. Return sisa jatah setelah dikurangi."""
@@ -193,8 +204,7 @@ def load_inventory():
     return {}
 
 def save_inventory(data):
-    with open(INVENTORY_FILE, "w") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+    tulis_json_aman(INVENTORY_FILE, data)
 
 
 # ─────────────────────────────────────────────
@@ -1413,8 +1423,7 @@ def ot_load_data() -> dict:
     return {}
 
 def ot_save_data(data: dict):
-    with open(OT_DATA_FILE, "w") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+    tulis_json_aman(OT_DATA_FILE, data)
 
 def get_bulan_key():
     return datetime.now().strftime("%Y-%m")
@@ -2242,7 +2251,7 @@ async def tambah_ot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         jam = float(context.args[1])
         assert jam > 0
-    except:
+    except (ValueError, AssertionError, IndexError):
         await update.message.reply_text("❌ Jam harus angka positif. Contoh: 1 atau 1.5")
         return
 
@@ -2281,7 +2290,7 @@ async def ambil_ot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         jam = float(context.args[1])
         assert jam > 0
-    except:
+    except (ValueError, AssertionError, IndexError):
         await update.message.reply_text("❌ Jam harus angka positif.")
         return
 
