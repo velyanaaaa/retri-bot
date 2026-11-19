@@ -20,13 +20,13 @@ LIBUR_TETAP_BARISTA = {
 # Jadwal shift barista per hari (fixed, sesuai papan tulis)
 # Kalau orangnya libur/cuti hari itu, entrinya di-skip (bukan dibaca dari sini)
 JADWAL_BARISTA = {
-    "senin":  {"Krisna": "09:30", "Dian": "08:30", "Ayuk": "06:30", "Yuyu": "LIBUR"},
-    "selasa": {"Krisna": "09:30", "Dian": "06:30", "Ayuk": "LIBUR", "Yuyu": "08:30"},
-    "rabu":   {"Krisna": "06:30", "Dian": "LIBUR", "Ayuk": "09:30", "Yuyu": "08:30"},
+    "senin":  {"Krisna": "09:30", "Dian": "08:00", "Ayuk": "06:30", "Yuyu": "LIBUR"},
+    "selasa": {"Krisna": "09:30", "Dian": "06:30", "Ayuk": "LIBUR", "Yuyu": "08:00"},
+    "rabu":   {"Krisna": "06:30", "Dian": "LIBUR", "Ayuk": "09:30", "Yuyu": "08:00"},
     "kamis":  {"Krisna": "06:30", "Dian": "09:30", "Ayuk": "09:30", "Yuyu": "06:30"},
     "jumat":  {"Krisna": "09:30", "Dian": "06:30", "Ayuk": "06:30", "Yuyu": "09:30"},
     "sabtu":  {"Krisna": "06:30", "Dian": "09:30", "Ayuk": "06:30", "Yuyu": "09:30"},
-    "minggu": {"Krisna": "LIBUR", "Dian": "06:30", "Ayuk": "09:30", "Yuyu": "08:30"},
+    "minggu": {"Krisna": "LIBUR", "Dian": "06:30", "Ayuk": "09:30", "Yuyu": "08:00"},
 }
 
 # ─────────────────────────────────────────────
