@@ -47,6 +47,8 @@ def tulis_json_aman(path, data):
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_IDS = [int(x) for x in os.environ.get("ADMIN_IDS", "").split(",") if x.strip()]
+if not ADMIN_IDS:
+    logging.warning("ADMIN_IDS kosong - semua perintah admin akan ditolak. Isi env ADMIN_IDS di Railway.")
 
 # Folder tempat data disimpan. Kalau Railway Volume di-mount di sini (lewat env
 # DATA_DIR), data akan PERSIST antar deploy. Kalau env DATA_DIR tidak di-set,
@@ -916,6 +918,9 @@ async def batalcuti(update: Update, context: ContextTypes.DEFAULT_TYPE):
 #  COMMAND: /cekjatah — cek sisa jatah cuti tahunan
 # ─────────────────────────────────────────────
 async def cekjatah(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ Perintah ini hanya untuk admin.")
+        return
     jatah = load_jatah_cuti()
 
     if context.args:
@@ -2036,6 +2041,9 @@ async def setbatas(update: Update, context: ContextTypes.DEFAULT_TYPE):
 #  COMMAND: /cekstok — lihat status stok semua barang
 # ─────────────────────────────────────────────
 async def cekstok(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ Perintah ini hanya untuk admin.")
+        return
     inventory = load_inventory()
     if not inventory:
         await update.message.reply_text(
@@ -2430,8 +2438,19 @@ async def tutup_bulan(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ─────────────────────────────────────────────
 #  MAIN
 # ─────────────────────────────────────────────
+async def error_handler(update, context):
+    """Catat error yang nggak ketangkep handler mana pun."""
+    logger.error("Error di handler", exc_info=context.error)
+    if isinstance(update, Update) and update.effective_message:
+        try:
+            await update.effective_message.reply_text("⚠️ Terjadi error. Coba lagi, atau hubungi admin.")
+        except Exception:
+            pass
+
+
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app.add_error_handler(error_handler)
 
     # ── Command jadwal ──
     app.add_handler(CommandHandler("start",         start))
