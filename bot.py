@@ -7,7 +7,21 @@ Gabungan bot jadwal shift & bot overtime karyawan.
 """
 
 import os, json, logging, zipfile
-from datetime import datetime, timedelta
+from datetime import datetime as _datetime, timedelta
+from zoneinfo import ZoneInfo
+
+WIB = ZoneInfo("Asia/Jakarta")
+
+
+class datetime(_datetime):
+    """datetime.now() selalu pakai waktu WIB (bukan UTC server Railway)."""
+
+    @classmethod
+    def now(cls, tz=None):
+        if tz is None:
+            return _datetime.now(WIB).replace(tzinfo=None)
+        return _datetime.now(tz)
+
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
 
@@ -15,6 +29,7 @@ from absensi_import import parse_absensi_txt, generate_pdf_absensi, rekap_ringka
 from inventory_import import parse_inventory_xlsx, cocokkan_nama_barang
 
 logging.basicConfig(level=logging.INFO)
+logging.getLogger("httpx").setLevel(logging.WARNING)  # jangan tampilkan URL (ada token bot) di log
 logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
