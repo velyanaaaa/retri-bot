@@ -230,14 +230,14 @@ def hitung_jadwal_barista_seminggu(week_data):
         * Orang yang jam fix-nya SUDAH UNIK (tidak sama dengan siapa pun,
           termasuk yang cuti) di hari itu → TETAP di jam fix-nya, tidak digeser.
         * Orang yang jam fix-nya SAMA (double) dengan orang yang cuti →
-          salah satunya (rotasi fairness) digeser mengisi slot 08:30 yang
+          salah satunya (rotasi fairness) digeser mengisi slot 08:00 yang
           kosong, sisanya tetap di jam fix.
     - Kalau ada 2 orang (atau lebih) yang tidak masuk sekaligus, sisa 2 orang
-      masuk → dipaksa ke 06:30 & 09:30 saja (08:30 di-skip), rotasi fairness.
+      masuk → dipaksa ke 06:30 & 09:30 saja (08:00 di-skip), rotasi fairness.
     - Yang tidak masuk ditandai LIBUR.
     """
     hasil = {hari: {} for hari in HARI_VALID}
-    dapat = {nama: {"06:30": 0, "08:30": 0, "09:30": 0} for nama in BARISTA}
+    dapat = {nama: {"06:30": 0, "08:00": 0, "09:30": 0} for nama in BARISTA}
 
     pindah_libur = week_data.get("pindah_libur", {})
 
@@ -290,7 +290,7 @@ def hitung_jadwal_barista_seminggu(week_data):
                     else:
                         perlu_geser.append(nama)
 
-            slot_standar = ["06:30", "08:30", "09:30"]
+            slot_standar = ["06:30", "08:00", "09:30"]
             slot_terisi  = set(
                 hasil[hari][n] for n in masuk
                 if n not in perlu_geser and hasil[hari].get(n) not in ("LIBUR", None)
@@ -326,7 +326,7 @@ def hitung_jadwal_barista_seminggu(week_data):
                 else:
                     # Jam fix invalid (swap), paksa slot yang masih kosong
                     slot_sisa = [
-                        j2 for j2 in ["06:30", "08:30", "09:30"]
+                        j2 for j2 in ["06:30", "08:00", "09:30"]
                         if j2 not in hasil[hari].values()
                     ]
                     if slot_sisa:
