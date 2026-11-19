@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Rahasia & konfigurasi lokal (jangan pernah di-commit)
+.env
+
+# Data & file sementara yang dihasilkan bot
+data/
+cuti_requests.json
+jatah_cuti.json
+*.tmp
+backup_retribot_*.zip
